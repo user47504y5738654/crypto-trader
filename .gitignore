@@ -1,0 +1,29 @@
+# Сборка
+build/
+cmake-build-*/
+*.o
+*.obj
+*.exe
+out/
+
+# Базы данных и логи
+*.db
+*.db-journal
+*.jsonl
+*.csv
+*.log
+
+# API ключи (никогда не коммитить!)
+*.key
+.env
+.config.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
