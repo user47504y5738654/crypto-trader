@@ -84,6 +84,7 @@ private:
     // Чат с DeepSeek (свободное общение)
     // ------------------------------------------------------------------------
     void processChat(const std::string& input);
+    void processChangeBalance(const std::string& input);
     
     // ------------------------------------------------------------------------
     // Торговля

@@ -69,6 +69,9 @@ public:
     // Включение/выключение dry-run (даже при наличии ключей)
     void setDryRun(bool dry);
     
+    // Установка симулированного баланса (только dry-run)
+    void setSimBalance(const std::string& currency, double amount);
+    
     // Dry-run: симуляция ордера
     OrderResult simulateOrder(const OrderCommand& cmd);
     

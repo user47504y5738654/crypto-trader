@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <ctime>
 #include <chrono>
+#include <cctype>
 
 // ============================================================================
 // Конструктор
@@ -148,6 +149,9 @@ void CLI::processCommand(const std::string& input) {
             std::cout << "Стратег не запущен.\n";
         }
     }
+    else if (lower.find("change-balance") == 0 || lower.find("изменить-баланс") == 0) {
+        processChangeBalance(input);
+    }
     else if (StrUtil::containsAny(lower, {"купи","продай","buy","sell"})) {
         processTradingCommand(input);
     }
@@ -204,6 +208,7 @@ void CLI::printHelp() {
               << "      — лимиты безопасности и параметры стратегии\n\n";
     
     std::cout << "  " << Color::BOLD << "Прочее:\n" << Color::RESET;
+    std::cout << "    " << "change-balance 1.9eth 5btc" << "  — изменить баланс dry-run\n";
     std::cout << "    " << "помощь / help / ?" << "     — этот экран\n";
     std::cout << "    " << "очистить / clear" << "       — очистить терминал\n";
     std::cout << "    " << "выход / exit / quit" << "    — завершить программу\n";
@@ -395,6 +400,67 @@ void CLI::processChat(const std::string& input) {
     } catch (const std::exception& e) {
         std::cout << Color::RED << "Ошибка чата: " << e.what() << "\n" << Color::RESET;
         m_audit->logError("chat:" + input, e.what());
+    }
+}
+
+// ============================================================================
+// Изменение симулированного баланса (dry-run)
+// ============================================================================
+void CLI::processChangeBalance(const std::string& input) {
+    if (m_config->mode != TradingMode::DRY_RUN) {
+        std::cout << Color::YELLOW << "Команда только для DRY-RUN режима.\n" << Color::RESET;
+        return;
+    }
+    
+    // Парсим токены вида "1.9eth", "5btc", "3sol", "10000usdt"
+    auto parts = StrUtil::split(input, ' ');
+    int changed = 0;
+    
+    for (size_t i = 1; i < parts.size(); ++i) {
+        std::string token = StrUtil::toLower(StrUtil::trim(parts[i]));
+        if (token.empty()) continue;
+        
+        // Извлекаем число и валюту
+        double amount = 0.0;
+        std::string ccy;
+        
+        // Ищем, где заканчивается число
+        size_t num_end = 0;
+        bool has_dot = false;
+        for (size_t j = 0; j < token.size(); ++j) {
+            char c = token[j];
+            if (isdigit(c) || (c == '.' && !has_dot)) {
+                if (c == '.') has_dot = true;
+                num_end = j + 1;
+            } else {
+                break;
+            }
+        }
+        
+        if (num_end == 0) continue;
+        
+        amount = std::stod(token.substr(0, num_end));
+        ccy = token.substr(num_end);
+        
+        // Нормализуем название валюты
+        if (ccy == "btc")       ccy = "BTC";
+        else if (ccy == "eth")  ccy = "ETH";
+        else if (ccy == "sol")  ccy = "SOL";
+        else if (ccy == "usdt") ccy = "USDT";
+        // прочие валюты — как есть (уже lowercase)
+        
+        // Устанавливаем
+        m_exchange->setSimBalance(ccy, amount);
+        std::cout << Color::GREEN << "  " << ccy << " → " << Format::crypto(amount) 
+                  << Color::RESET << "\n";
+        changed++;
+    }
+    
+    if (changed == 0) {
+        std::cout << Color::YELLOW << "Использование: change-balance <сумма><валюта> ...\n";
+        std::cout << "Пример: change-balance 1.9eth 5btc 3sol 10000usdt\n" << Color::RESET;
+    } else {
+        std::cout << Color::GREEN << "Баланс обновлён (" << changed << " валют).\n" << Color::RESET;
     }
 }
 

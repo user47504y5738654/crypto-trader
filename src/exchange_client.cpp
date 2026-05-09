@@ -111,6 +111,11 @@ void ExchangeClient::setDryRun(bool dry) {
     m_dry_run = dry;
 }
 
+void ExchangeClient::setSimBalance(const std::string& currency, double amount) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_sim_balance[currency] = {amount, 0.0};
+}
+
 // ============================================================================
 // Создание HMAC-SHA256 подписи (CoinEx API v2)
 // 
