@@ -185,7 +185,7 @@ void CLI::printHelp() {
     
     std::cout << "  " << Color::BOLD << "Режимы стратега:\n" << Color::RESET;
     std::cout << "    " << Color::YELLOW << "стратег" << Color::RESET << " / strategist"
-              << "  — полуавтомат: AI предлагает → вы подтверждаете\n";
+              << "  — авто-стратег: AI анализирует рынок и торгует сам\n";
     std::cout << "    " << Color::RED << "авто" << Color::RESET << " / auto"
               << "           — полный автомат: AI торгует сам. Можно давать инструкции в чате!\n";
     std::cout << "    " << Color::GREEN << "ручной" << Color::RESET << " / manual"
@@ -387,16 +387,7 @@ void CLI::processChat(const std::string& input) {
                 return;
             }
             
-            // LIVE: подтверждение
-            std::cout << Color::YELLOW << "⚠ Подтвердите (yes/no): " << Color::RESET;
-            std::string confirm;
-            std::getline(std::cin, confirm);
-            if (confirm != "yes" && confirm != "y") {
-                std::cout << "Отменено.\n";
-                m_audit->logOrder(cmd, "CANCELLED", "пользователь");
-                return;
-            }
-            
+            // LIVE: автоисполнение
             auto result = executeOrder(cmd);
             if (result.status == OrderStatus::FILLED) {
                 std::cout << Color::GREEN << "✅ Исполнено! ID: " << result.order_id << "\n" << Color::RESET;
@@ -450,16 +441,7 @@ void CLI::processTradingCommand(const std::string& input) {
             return;
         }
         
-        // Live: подтверждение
-        std::cout << Color::YELLOW << "\n⚠ Подтвердите (yes/no): " << Color::RESET;
-        std::string confirm;
-        std::getline(std::cin, confirm);
-        if (confirm != "yes" && confirm != "y") {
-            std::cout << "Отменено.\n";
-            m_audit->logOrder(cmd, "CANCELLED", "пользователь");
-            return;
-        }
-        
+        // Live: автоисполнение
         auto result = executeOrder(cmd);
         if (result.status == OrderStatus::FILLED) {
             std::cout << Color::GREEN << "✅ Исполнено! ID: " << result.order_id << "\n" << Color::RESET;
@@ -526,9 +508,9 @@ void CLI::switchToSemiAuto() {
     }
     
     m_config->strat_mode = StrategistMode::SEMI_AUTO;
-    std::cout << Color::YELLOW << "\n🔄 Стратег-Советник запущен.\n";
-    std::cout << "DeepSeek анализирует рынок и предлагает сделки.\n";
-    std::cout << "Вы подтверждаете каждую. 'стоп' — остановить.\n" << Color::RESET;
+    std::cout << Color::YELLOW << "\n🔄 Авто-стратег запущен.\n";
+    std::cout << "DeepSeek анализирует рынок и торгует самостоятельно.\n";
+    std::cout << "'стоп' — остановить, 'статус' — сводка, любой текст — чат с AI.\n" << Color::RESET;
     
     startStrategistLoop();
 }
@@ -537,17 +519,6 @@ void CLI::switchToFullAuto() {
     if (!m_llm->isAvailable()) {
         std::cout << Color::RED << "Нужен ключ DeepSeek.\n" << Color::RESET;
         return;
-    }
-    
-    if (m_config->mode == TradingMode::LIVE) {
-        std::cout << Color::RED << "\n⚠ АВТО-РЕЖИМ + LIVE! Средства под управлением AI!\n";
-        std::cout << "Подтвердите (yes/no): " << Color::RESET;
-        std::string c;
-        std::getline(std::cin, c);
-        if (c != "yes" && c != "y") {
-            std::cout << "Отмена.\n";
-            return;
-        }
     }
     
     m_config->strat_mode = StrategistMode::FULL_AUTO;
@@ -639,26 +610,7 @@ void CLI::strategistIteration() {
             std::cout << Color::YELLOW << "  ⚠ " << w << Color::RESET << "\n";
         }
         
-        // Шаг 7: Исполнение
-        if (m_config->strat_mode == StrategistMode::SEMI_AUTO) {
-            // Полуавтомат — запрос подтверждения
-            std::cout << Color::YELLOW << "\n  Подтвердить? (yes/no/skip): " << Color::RESET;
-            std::string confirm;
-            std::getline(std::cin, confirm);
-            
-            if (confirm == "skip") {
-                std::cout << "  Пропущено.\n";
-                m_audit->logStrategistDecision(decision, "skipped");
-                return;
-            }
-            if (confirm != "yes" && confirm != "y") {
-                std::cout << "  Отклонено.\n";
-                m_audit->logStrategistDecision(decision, "declined");
-                return;
-            }
-        }
-        
-        // Исполняем
+        // Шаг 7: Автоисполнение (без подтверждений)
         bool ok = executeStrategistDecision(decision);
         if (ok) {
             m_audit->logStrategistDecision(decision, "executed");

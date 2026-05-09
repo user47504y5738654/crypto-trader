@@ -140,14 +140,7 @@ int main(int argc, char* argv[]) {
     if (config->mode == TradingMode::DRY_RUN) {
         std::cout << "⚪ DRY-RUN (симуляция)\n";
     } else {
-        std::cout << "🔴 LIVE (реальная торговля!)\n";
-        std::cout << "⚠ Подтвердите (yes/no): ";
-        std::string c;
-        std::getline(std::cin, c);
-        if (c != "yes" && c != "y") {
-            std::cout << "Переключено в DRY-RUN.\n";
-            config->mode = TradingMode::DRY_RUN;
-        }
+        std::cout << "🔴 LIVE — реальная торговля. Сделки исполняются автоматически.\n";
     }
     
     std::string sm;
