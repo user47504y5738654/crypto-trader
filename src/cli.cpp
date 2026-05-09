@@ -1,16 +1,21 @@
 /*
  * cli.cpp — Реализация CLI-оболочки
  * 
- * Обрабатывает пользовательский ввод, маршрутизирует команды
- * и отображает результаты в удобном виде.
+ * Три режима:
+ *   MANUAL    — пользователь → DeepSeek-парсер → валидация → CoinEx
+ *   SEMI_AUTO — цикл стратега: анализ → предложение → подтверждение → CoinEx
+ *   FULL_AUTO — цикл стратега: анализ → автоисполнение (с лимитами)
  */
 
 #include "cli.h"
+#include "utils.h"
+
 #include <iostream>
 #include <sstream>
 #include <algorithm>
 #include <iomanip>
 #include <ctime>
+#include <chrono>
 
 // ============================================================================
 // Конструктор
@@ -20,115 +25,135 @@ CLI::CLI(std::shared_ptr<AppConfig> config,
          std::shared_ptr<Validator> validator,
          std::shared_ptr<ExchangeClient> exchange,
          std::shared_ptr<AuditLogger> audit)
-    : m_config(config)
-    , m_llm(llm)
-    , m_validator(validator)
-    , m_exchange(exchange)
-    , m_audit(audit)
+    : m_config(config), m_llm(llm), m_validator(validator),
+      m_exchange(exchange), m_audit(audit)
 {
-    // Приветственное сообщение
+    // Настройка стратегии по умолчанию
+    m_strategy.name = "default";
+    
     std::cout << Color::GREEN << "╔══════════════════════════════════════╗\n";
-    std::cout << "║  Система инициализирована           ║\n";
-    std::cout << "║  Введите 'помощь' для списка команд  ║\n";
+    std::cout << "║  CryptoTrader v2.0 — AI-Стратег      ║\n";
+    std::cout << "║  DeepSeek + CoinEx API v2            ║\n";
+    std::cout << "║  'помощь' — список команд            ║\n";
     std::cout << "╚══════════════════════════════════════╝\n" << Color::RESET;
 }
 
-// ============================================================================
-// Деструктор
-// ============================================================================
 CLI::~CLI() {
-    if (m_audit) {
-        m_audit->logSystemEvent("Завершение приложения", "shutdown");
-    }
+    shutdown();
+    if (m_audit) m_audit->logSystemEvent("shutdown", "ok");
 }
 
 // ============================================================================
-// Запуск основного цикла
+// Запуск
 // ============================================================================
 void CLI::run() {
     std::string input;
     
+    // Если запущен в режиме стратега — стартуем цикл
+    if (m_config->strat_mode == StrategistMode::SEMI_AUTO) {
+        switchToSemiAuto();
+    } else if (m_config->strat_mode == StrategistMode::FULL_AUTO) {
+        switchToFullAuto();
+    }
+    
     while (m_running) {
         printPrompt();
         
-        if (!std::getline(std::cin, input)) {
-            // EOF (Ctrl+D) или ошибка
-            break;
-        }
-        
-        // Пропускаем пустые строки
+        if (!std::getline(std::cin, input)) break;
         if (input.empty()) continue;
         
-        // Добавляем в историю
         if (m_history.empty() || m_history.back() != input) {
             m_history.push_back(input);
         }
         m_history_pos = m_history.size();
         
-        // Обрабатываем команду
         processCommand(input);
     }
 }
 
-// ============================================================================
-// Остановка
-// ============================================================================
 void CLI::shutdown() {
     m_running = false;
+    stopStrategistLoop();
 }
 
 // ============================================================================
-// Вывод приглашения
+// Приглашение
 // ============================================================================
 void CLI::printPrompt() {
-    std::string mode_str = (m_config->mode == TradingMode::LIVE) 
-        ? Color::RED + "LIVE" + Color::RESET 
-        : Color::CYAN + "DRY-RUN" + Color::RESET;
+    std::string mode;
+    if (m_config->mode == TradingMode::LIVE) {
+        mode = Color::RED + "LIVE" + Color::RESET;
+    } else {
+        mode = Color::CYAN + "DRY" + Color::RESET;
+    }
     
-    std::cout << Color::GREEN << "crypto>" << Color::RESET;
-    std::cout << " [" << mode_str << "] ";
+    std::string strat;
+    switch (m_config->strat_mode) {
+        case StrategistMode::MANUAL:   strat = ""; break;
+        case StrategistMode::SEMI_AUTO: strat = Color::YELLOW + " [Стратег-Советник]" + Color::RESET; break;
+        case StrategistMode::FULL_AUTO: strat = Color::RED + " [Стратег-Авто]" + Color::RESET; break;
+    }
+    
+    std::cout << Color::GREEN << "crypto" << Color::RESET
+              << "[" << mode << "]" << strat << "> ";
     std::cout.flush();
 }
 
 // ============================================================================
-// Обработка команды
+// Обработка команд
 // ============================================================================
 void CLI::processCommand(const std::string& input) {
-    std::string lower_input = input;
-    std::transform(lower_input.begin(), lower_input.end(), lower_input.begin(), ::tolower);
+    std::string lower = StrUtil::toLower(input);
     
-    // Определяем команду
-    if (lower_input == "выход" || lower_input == "exit" || lower_input == "quit") {
-        std::cout << "Завершение работы...\n";
+    if (lower == "выход" || lower == "exit" || lower == "quit") {
         m_running = false;
-        
-    } else if (lower_input == "помощь" || lower_input == "help" || lower_input == "?") {
+    }
+    else if (lower == "помощь" || lower == "help" || lower == "?") {
         printHelp();
-        
-    } else if (lower_input == "баланс" || lower_input == "balance") {
+    }
+    else if (lower == "баланс" || lower == "balance") {
         printBalance();
-        
-    } else if (lower_input == "статус" || lower_input == "status") {
+    }
+    else if (lower == "статус" || lower == "status") {
         printStatus();
-        
-    } else if (lower_input == "история" || lower_input == "history") {
+    }
+    else if (lower == "история" || lower == "history") {
         printHistory();
-        
-    } else if (lower_input == "лимиты" || lower_input == "limits") {
+    }
+    else if (lower == "лимиты" || lower == "limits") {
         printLimits();
-        
-    } else if (lower_input == "очистить" || lower_input == "clear") {
-        std::cout << "\033[2J\033[1;1H";  // Очистка экрана
-        
-    } else if (lower_input.find("купи") != std::string::npos ||
-               lower_input.find("продай") != std::string::npos ||
-               lower_input.find("buy") != std::string::npos ||
-               lower_input.find("sell") != std::string::npos) {
-        // Торговая команда на естественном языке
+    }
+    else if (lower == "очистить" || lower == "clear") {
+        std::cout << "\033[2J\033[1;1H";
+    }
+    else if (lower == "стратег" || lower == "strategist") {
+        // Включаем полуавтомат
+        if (m_config->strat_mode == StrategistMode::MANUAL) {
+            switchToSemiAuto();
+        } else {
+            std::cout << Color::YELLOW << "Стратег уже активен. 'стоп' для остановки.\n" << Color::RESET;
+        }
+    }
+    else if (lower == "авто" || lower == "auto") {
+        switchToFullAuto();
+    }
+    else if (lower == "ручной" || lower == "manual") {
+        switchToManual();
+    }
+    else if (lower == "стоп" || lower == "stop") {
+        if (m_strategist_running) {
+            stopStrategistLoop();
+            std::cout << Color::GREEN << "Стратег остановлен. Ручной режим.\n" << Color::RESET;
+        } else {
+            std::cout << "Стратег не запущен.\n";
+        }
+    }
+    else if (StrUtil::containsAny(lower, {"купи","продай","buy","sell"})) {
         processTradingCommand(input);
-        
-    } else {
-        std::cout << Color::YELLOW << "Неизвестная команда. Введите 'помощь' для списка команд.\n" << Color::RESET;
+    }
+    else {
+        // Всё остальное → чат с DeepSeek (работает в любом режиме, включая авто)
+        processChat(input);
     }
 }
 
@@ -136,257 +161,604 @@ void CLI::processCommand(const std::string& input) {
 // Справка
 // ============================================================================
 void CLI::printHelp() {
-    std::cout << Color::CYAN << "\n╔══════════════════════════════════════════════════╗\n";
-    std::cout << "║              СПРАВКА ПО КОМАНДАМ              ║\n";
-    std::cout << "╚══════════════════════════════════════════════════╝\n" << Color::RESET;
+    std::cout << Color::CYAN << "\n╔══════════════════════════════════════════════════════════╗\n";
+    std::cout << "║              🤖  CRYPTOTRADER v2.0  —  AI-СТРАТЕГ       ║\n";
+    std::cout << "║              DeepSeek + CoinEx API v2                    ║\n";
+    std::cout << "╚══════════════════════════════════════════════════════════╝\n" << Color::RESET;
     
-    std::cout << "\n📝 " << Color::BOLD << "Торговые инструкции (на русском):\n" << Color::RESET;
-    std::cout << "  \"купи 0.15 ETH по рынку, тейк 10%, стоп 3%\"\n";
-    std::cout << "  \"продай 0.5 BTC, лимит 65000 USDT\"\n";
-    std::cout << "  \"buy 100 USDT of SOL, take profit 5%\"\n";
+    std::cout << "\n" << Color::BOLD << Color::GREEN << "💬  ЧАТ С DeepSeek" << Color::RESET;
+    std::cout << Color::DIM << "  (любое сообщение → AI отвечает)\n" << Color::RESET;
+    std::cout << "  Просто пиши — AI поймёт. Примеры:\n";
+    std::cout << "    " << Color::CYAN << "привет" << Color::RESET << "                                          — поздороваться\n";
+    std::cout << "    " << Color::CYAN << "какой рынок сейчас?" << Color::RESET << "                            — спросить про рынок\n";
+    std::cout << "    " << Color::CYAN << "что думаешь про BTC?" << Color::RESET << "                           — анализ монеты\n";
+    std::cout << "    " << Color::CYAN << "как работает стоп-лосс?" << Color::RESET << "                       — обучение\n";
+    std::cout << "    " << Color::CYAN << "купи 0.15 ETH по рынку, тейк 10%, стоп 3%" << Color::RESET << "    — торговля через чат\n\n";
     
-    std::cout << "\n⚙️ " << Color::BOLD << "Системные команды:\n" << Color::RESET;
-    std::cout << "  баланс / balance       — показать баланс\n";
-    std::cout << "  статус / status        — статус системы\n";
-    std::cout << "  история / history      — история ордеров\n";
-    std::cout << "  лимиты / limits        — текущие лимиты\n";
-    std::cout << "  помощь / help / ?      — эта справка\n";
-    std::cout << "  очистить / clear       — очистить экран\n";
-    std::cout << "  выход / exit / quit    — выход\n";
+    std::cout << Color::BOLD << Color::YELLOW << "📋  КОМАНДЫ" << Color::RESET << "\n\n";
     
-    std::cout << "\n" << Color::DIM << "Совет: Используйте стрелки вверх/вниз для истории команд.\n" << Color::RESET;
+    std::cout << "  " << Color::BOLD << "Торговля (быстрые команды):\n" << Color::RESET;
+    std::cout << "    " << Color::GREEN << "купи" << Color::RESET << " / " << Color::GREEN << "buy" << Color::RESET
+              << "        — покупка (напр: купи 0.15 ETH по рынку)\n";
+    std::cout << "    " << Color::RED << "продай" << Color::RESET << " / " << Color::RED << "sell" << Color::RESET
+              << "     — продажа (напр: продай 0.5 BTC лимит 65000)\n\n";
+    
+    std::cout << "  " << Color::BOLD << "Режимы стратега:\n" << Color::RESET;
+    std::cout << "    " << Color::YELLOW << "стратег" << Color::RESET << " / strategist"
+              << "  — полуавтомат: AI предлагает → вы подтверждаете\n";
+    std::cout << "    " << Color::RED << "авто" << Color::RESET << " / auto"
+              << "           — полный автомат: AI торгует сам. Можно давать инструкции в чате!\n";
+    std::cout << "    " << Color::GREEN << "ручной" << Color::RESET << " / manual"
+              << "       — вернуться в ручной режим\n";
+    std::cout << "    " << Color::CYAN << "стоп" << Color::RESET << " / stop"
+              << "           — остановить стратега\n\n";
+    
+    std::cout << "  " << Color::BOLD << "Информация:\n" << Color::RESET;
+    std::cout << "    " << Color::BLUE << "баланс" << Color::RESET << " / balance"
+              << "      — баланс и стоимость портфеля\n";
+    std::cout << "    " << Color::MAGENTA << "статус" << Color::RESET << " / status"
+              << "      — статус системы, режимы, статистика\n";
+    std::cout << "    " << Color::YELLOW << "история" << Color::RESET << " / history"
+              << "    — последние 15 ордеров\n";
+    std::cout << "    " << Color::CYAN << "лимиты" << Color::RESET << " / limits"
+              << "      — лимиты безопасности и параметры стратегии\n\n";
+    
+    std::cout << "  " << Color::BOLD << "Прочее:\n" << Color::RESET;
+    std::cout << "    " << "помощь / help / ?" << "     — этот экран\n";
+    std::cout << "    " << "очистить / clear" << "       — очистить терминал\n";
+    std::cout << "    " << "выход / exit / quit" << "    — завершить программу\n";
+    
+    std::cout << "\n" << Color::DIM << "💡 Совет: " << Color::RESET
+              << Color::DIM << "В ручном режиме любое сообщение, не похожее на команду, "
+              << "отправляется DeepSeek как чат. AI понимает русский и английский.\n" << Color::RESET;
 }
 
 // ============================================================================
-// Вывод баланса
+// Баланс
 // ============================================================================
 void CLI::printBalance() {
-    std::cout << Color::BLUE << "\n📊 Запрос баланса...\n" << Color::RESET;
+    std::cout << Color::BLUE << "\n📊 Баланс:\n" << Color::RESET;
     
     try {
-        auto balance = m_exchange->getBalance();
+        auto ctx = m_exchange->getMarketContext();
+        auto& balances = ctx.balances;
         
-        std::cout << Color::BOLD << "Баланс:\n" << Color::RESET;
-        std::cout << "┌──────────┬──────────────┬────────────────┐\n";
-        std::cout << "│ Валюта   │ Доступно      │ Заморожено     │\n";
-        std::cout << "├──────────┼──────────────┼────────────────┤\n";
+        double total = 0.0;
         
-        for (const auto& [currency, bal] : balance) {
-            if (bal.available > 0.0001 || bal.frozen > 0.0001) {
-                std::cout << "│ " << std::left << std::setw(8) << currency << " │ ";
-                std::cout << std::right << std::setw(12) << std::fixed << std::setprecision(4) << bal.available << " │ ";
-                std::cout << std::setw(14) << bal.frozen << " │\n";
+        for (const auto& [ccy, bal] : balances) {
+            if (bal.total() < 0.0001) continue;
+            
+            double usd_value = 0.0;
+            if (ccy == "USDT" || ccy == "USDC") {
+                usd_value = bal.total();
+            } else {
+                auto it = ctx.tickers.find(ccy + "USDT");
+                if (it != ctx.tickers.end()) {
+                    usd_value = bal.total() * it->second.last;
+                }
             }
+            total += usd_value;
+            
+            std::cout << "  " << std::left << std::setw(6) << ccy
+                      << ": " << Format::crypto(bal.available);
+            if (bal.frozen > 0) std::cout << " (+" << Format::crypto(bal.frozen) << " зам.)";
+            if (usd_value > 0) std::cout << "  ~" << Format::usdt(usd_value);
+            std::cout << "\n";
         }
         
-        std::cout << "└──────────┴──────────────┴────────────────┘\n";
+        std::cout << "  ─────────────────────────────\n";
+        std::cout << "  Портфель: ~" << Format::usdt(total) << "\n";
         
     } catch (const std::exception& e) {
-        std::cout << Color::RED << "Ошибка получения баланса: " << e.what() << Color::RESET << "\n";
+        std::cout << Color::RED << "Ошибка: " << e.what() << Color::RESET << "\n";
     }
 }
 
 // ============================================================================
-// Статус системы
+// Статус
 // ============================================================================
 void CLI::printStatus() {
-    std::cout << Color::MAGENTA << "\nℹ️  Статус системы:\n" << Color::RESET;
-    
-    std::string mode_str = (m_config->mode == TradingMode::LIVE) 
-        ? Color::RED + "LIVE (реальная торговля)" + Color::RESET
-        : Color::CYAN + "DRY RUN (симуляция)" + Color::RESET;
+    std::cout << Color::MAGENTA << "\nℹ️  Статус:\n" << Color::RESET;
     
     auto now = std::chrono::system_clock::now();
-    std::time_t now_time = std::chrono::system_clock::to_time_t(now);
-    char time_str[100];
-    std::strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", std::localtime(&now_time));
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    char tb[64]; std::strftime(tb, sizeof(tb), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
     
-    std::cout << "  Режим:      " << mode_str << "\n";
-    std::cout << "  Время:      " << time_str << "\n";
-    std::cout << "  Версия:     " << APP_VERSION << "\n";
-    std::cout << "  Статус API: " << (m_exchange->isConnected() ? Color::GREEN + "OK" : Color::RED + "Ошибка") << Color::RESET << "\n";
+    std::cout << "  Время:    " << tb << "\n";
+    std::cout << "  Версия:   " << APP_VERSION << "\n";
+    std::cout << "  Режим:    " << (m_config->mode == TradingMode::LIVE ? "LIVE 🔴" : "DRY-RUN ⚪") << "\n";
     
-    // Если dry-run, показываем статистику симуляции
+    std::string sm;
+    switch (m_config->strat_mode) {
+        case StrategistMode::MANUAL:   sm = "Ручной"; break;
+        case StrategistMode::SEMI_AUTO: sm = "Полуавтомат (стратег-советник)"; break;
+        case StrategistMode::FULL_AUTO: sm = "Автомат (стратег торгует)"; break;
+    }
+    std::cout << "  Стратег:  " << sm << "\n";
+    std::cout << "  API:      " << (m_exchange->isConnected() ? "OK ✅" : "Ошибка ❌") << "\n";
+    std::cout << "  DeepSeek: " << (m_llm->isAvailable() ? "OK ✅" : "Нет ключа ⚠") << "\n";
+    
     if (m_config->mode == TradingMode::DRY_RUN) {
         auto stats = m_exchange->getDryRunStats();
-        std::cout << "\n📈 Статистика симуляции:\n";
-        std::cout << "  Всего сделок:  " << stats.total_trades << "\n";
-        std::cout << "  Успешных:      " << stats.successful_trades << "\n";
-        std::cout << "  Прибыль:       " << Color::GREEN << "+" << stats.total_profit << " USDT" << Color::RESET << "\n";
+        std::cout << "\n  Dry-Run: " << stats.total_trades << " сделок, "
+                  << "комиссий: $" << Format::price(stats.total_fees) << "\n";
     }
+    
+    std::cout << "  Дневной P&L: $" << m_validator->getDailyPnL() << "\n";
+    std::cout << "  Сделок сегодня: " << m_validator->getDailyTrades() << "\n";
 }
 
 // ============================================================================
-// История ордеров
+// История
 // ============================================================================
 void CLI::printHistory() {
-    std::cout << Color::YELLOW << "\n📜 История ордеров:\n" << Color::RESET;
+    std::cout << Color::YELLOW << "\n📜 История:\n" << Color::RESET;
     
-    try {
-        auto orders = m_audit->getRecentOrders(20);
-        
-        if (orders.empty()) {
-            std::cout << "  История пуста.\n";
-            return;
+    auto orders = m_audit->getRecentOrders(15);
+    if (orders.empty()) {
+        std::cout << "  Пусто.\n";
+        return;
+    }
+    
+    for (const auto& o : orders) {
+        std::string color = (o.status_str == "FILLED") ? Color::GREEN : Color::YELLOW;
+        std::cout << "  " << o.time.substr(11, 8) << " | "
+                  << std::setw(4) << o.side << " | "
+                  << std::setw(10) << o.symbol << " | "
+                  << Format::crypto(o.amount) << " | "
+                  << color << o.status_str << Color::RESET;
+        if (!o.reason.empty()) {
+            std::cout << " | " << o.reason.substr(0, 60);
         }
-        
-        std::cout << "┌──────────┬────────┬──────────┬────────────┬──────────────┐\n";
-        std::cout << "│ Время    │ Тип    │ Пара     │ Объём      │ Статус       │\n";
-        std::cout << "├──────────┼────────┼──────────┼────────────┼──────────────┤\n";
-        
-        for (const auto& order : orders) {
-            std::cout << "│ " << std::setw(8) << order.time.substr(11, 8) << " │ ";
-            std::cout << std::setw(6) << order.side << " │ ";
-            std::cout << std::setw(8) << order.symbol << " │ ";
-            std::cout << std::setw(10) << std::fixed << std::setprecision(4) << order.amount << " │ ";
-            std::cout << std::setw(12) << order.status_str << " │\n";
-        }
-        
-        std::cout << "└──────────┴────────┴──────────┴────────────┴──────────────┘\n";
-        
-    } catch (const std::exception& e) {
-        std::cout << Color::RED << "Ошибка получения истории: " << e.what() << Color::RESET << "\n";
+        std::cout << "\n";
     }
 }
 
 // ============================================================================
-// Вывод лимитов
+// Лимиты
 // ============================================================================
 void CLI::printLimits() {
     auto limits = m_validator->getLimits();
     
-    std::cout << Color::BLUE << "\n🔒 Текущие лимиты безопасности:\n" << Color::RESET;
-    std::cout << "  Максимальный ордер:       " << limits.max_order_usd << " USDT\n";
-    std::cout << "  Дневной лимит убытка:     " << limits.daily_loss_limit << " USDT\n";
-    std::cout << "  Макс. открытых позиций:   " << limits.max_open_positions << "\n";
-    std::cout << "  Отклонение от рынка:      ±" << limits.max_market_deviation << "%\n";
-    std::cout << "  Circuit Breaker:          " << limits.circuit_breaker_count << " ошибок → " 
-              << limits.circuit_breaker_seconds << "с паузы\n";
+    std::cout << Color::BLUE << "\n🔒 Лимиты безопасности:\n" << Color::RESET;
+    std::cout << "  Макс. ордер:         $" << limits.max_order_usd << "\n";
+    std::cout << "  Дневной лимит:       $" << limits.daily_loss_limit << "\n";
+    std::cout << "  Макс. экспозиция:    " << limits.max_total_exposure_pct << "%\n";
+    std::cout << "  Макс. позиций:       " << limits.max_open_positions << "\n";
+    std::cout << "  Circuit breaker:     " << limits.circuit_breaker_errors << " ошибок → "
+              << limits.circuit_breaker_seconds << "с\n";
+    std::cout << "  Мин. уверенность:    " << limits.min_auto_confidence << "\n";
+    
+    std::cout << "\n📋 Стратегия \"" << m_strategy.name << "\":\n";
+    std::cout << "  Пары:                ";
+    for (size_t i = 0; i < m_strategy.symbols.size(); ++i) {
+        if (i > 0) std::cout << ", ";
+        std::cout << m_strategy.symbols[i];
+    }
+    std::cout << "\n";
+    std::cout << "  Интервал анализа:    " << m_strategy.analysis_interval_sec << "с\n";
+    std::cout << "  Тейк/стоп:           +" << m_strategy.take_profit_default
+              << "% / -" << m_strategy.stop_loss_default << "%\n";
+    std::cout << "  Макс. сделок/день:   " << m_strategy.max_daily_trades << "\n";
 }
 
 // ============================================================================
-// Обработка торговой команды через LLM
+// Чат с DeepSeek (свободное общение)
 // ============================================================================
-void CLI::processTradingCommand(const std::string& natural_language_input) {
-    std::cout << Color::CYAN << "\n🤖 Анализ инструкции через DeepSeek...\n" << Color::RESET;
+void CLI::processChat(const std::string& input) {
+    if (!m_llm->isAvailable()) {
+        std::cout << Color::YELLOW << "Нужен ключ DeepSeek для чата. "
+                  << "Установите DEEPSEEK_API_KEY.\n" << Color::RESET;
+        std::cout << Color::DIM << "Команды без AI: баланс, статус, история, лимиты, помощь, выход\n"
+                  << Color::RESET;
+        return;
+    }
+    
+    std::cout << Color::CYAN << "\n💬 " << Color::RESET;
     
     try {
-        // Шаг 1: Получаем контекст с биржи (баланс, цены)
         auto context = m_exchange->getMarketContext();
+        auto response = m_llm->chat(input, context);
         
-        // Шаг 2: Отправляем в LLM
-        OrderCommand cmd = m_llm->parseCommand(natural_language_input, context);
+        // Вывод ответа
+        std::cout << Color::GREEN << "AI: " << Color::RESET << response.message << "\n";
         
-        if (cmd.action.empty()) {
-            std::cout << Color::RED << "❌ LLM не смог интерпретировать команду.\n" << Color::RESET;
-            return;
-        }
-        
-        std::cout << Color::GREEN << "✅ Команда распознана:\n" << Color::RESET;
-        std::cout << "  Действие:   " << cmd.action << "\n";
-        std::cout << "  Пара:       " << cmd.symbol << "\n";
-        std::cout << "  Объём:      " << cmd.amount << "\n";
-        std::cout << "  Тип цены:   " << cmd.price_type << "\n";
-        if (cmd.price_type == "limit") {
-            std::cout << "  Цена:       " << cmd.price << " USDT\n";
-        }
-        std::cout << "  Тейк-профит: " << cmd.take_profit << "%\n";
-        std::cout << "  Стоп-лосс:  " << cmd.stop_loss << "%\n";
-        
-        // Шаг 3: Валидация
-        std::cout << "\n🔍 Проверка рисков...\n";
-        auto validation_result = m_validator->validate(cmd, context);
-        
-        if (!validation_result.is_valid) {
-            std::cout << Color::RED << "❌ Ошибка валидации: " << validation_result.error_message << "\n" << Color::RESET;
-            m_audit->logCommand(cmd, "REJECTED", validation_result.error_message);
-            return;
-        }
-        
-        std::cout << Color::GREEN << "✅ Валидация пройдена\n" << Color::RESET;
-        
-        // Шаг 4: Исполнение (в зависимости от режима)
-        if (m_config->mode == TradingMode::DRY_RUN) {
-            printOrderPreview(cmd);
-            m_audit->logCommand(cmd, "DRY_RUN", "Симуляция");
-        } else {
-            // Запрашиваем подтверждение перед live-торговлей
-            std::cout << Color::YELLOW << "\n⚠ Подтвердите ордер (yes/no): " << Color::RESET;
-            std::string confirmation;
-            std::getline(std::cin, confirmation);
+        // Если есть торговая команда — исполняем
+        if (response.wants_to_trade) {
+            auto& cmd = response.trade;
             
-            if (confirmation != "yes" && confirmation != "y") {
-                std::cout << "Ордер отменён.\n";
-                m_audit->logCommand(cmd, "CANCELLED_BY_USER", "Пользователь отменил");
+            std::cout << "\n" << Color::CYAN << "⚡ Обнаружена торговая команда: "
+                      << cmd.action << " " << cmd.amount << " " << cmd.symbol << "\n" << Color::RESET;
+            
+            auto validation = m_validator->validateOrder(cmd, context);
+            if (!validation.is_valid) {
+                std::cout << Color::RED << "❌ " << validation.error_message << "\n" << Color::RESET;
+                m_audit->logOrder(cmd, "REJECTED", validation.error_message);
                 return;
             }
             
-            OrderResult result = executeOrder(cmd);
+            for (auto& w : validation.warnings) {
+                std::cout << Color::YELLOW << "⚠ " << w << "\n" << Color::RESET;
+            }
             
+            if (m_config->mode == TradingMode::DRY_RUN) {
+                printOrderPreview(cmd);
+                m_audit->logOrder(cmd, "DRY_RUN", "чат-команда");
+                return;
+            }
+            
+            // LIVE: подтверждение
+            std::cout << Color::YELLOW << "⚠ Подтвердите (yes/no): " << Color::RESET;
+            std::string confirm;
+            std::getline(std::cin, confirm);
+            if (confirm != "yes" && confirm != "y") {
+                std::cout << "Отменено.\n";
+                m_audit->logOrder(cmd, "CANCELLED", "пользователь");
+                return;
+            }
+            
+            auto result = executeOrder(cmd);
             if (result.status == OrderStatus::FILLED) {
-                std::cout << Color::GREEN << "✅ Ордер исполнен! ID: " << result.order_id << "\n" << Color::RESET;
+                std::cout << Color::GREEN << "✅ Исполнено! ID: " << result.order_id << "\n" << Color::RESET;
+                m_validator->registerTrade(result.filled_value * 0.001);
             } else {
-                std::cout << Color::RED << "❌ Ошибка: " << result.error_msg << "\n" << Color::RESET;
+                std::cout << Color::RED << "❌ " << result.error_msg << "\n" << Color::RESET;
             }
         }
         
     } catch (const std::exception& e) {
-        std::cout << Color::RED << "❌ Критическая ошибка: " << e.what() << "\n" << Color::RESET;
-        m_audit->logError(natural_language_input, e.what());
+        std::cout << Color::RED << "Ошибка чата: " << e.what() << "\n" << Color::RESET;
+        m_audit->logError("chat:" + input, e.what());
     }
 }
 
 // ============================================================================
-// Предпросмотр ордера (dry-run)
+// Торговая команда (MANUAL)
+// ============================================================================
+void CLI::processTradingCommand(const std::string& input) {
+    std::cout << Color::CYAN << "\n🤖 Анализ через DeepSeek...\n" << Color::RESET;
+    
+    try {
+        auto context = m_exchange->getMarketContext();
+        OrderCommand cmd = m_llm->parseCommand(input, context);
+        
+        if (cmd.action.empty()) {
+            std::cout << Color::RED << "❌ Не удалось распознать команду.\n" << Color::RESET;
+            return;
+        }
+        
+        std::cout << Color::GREEN << "✅ Распознано: " << cmd.action << " "
+                  << cmd.amount << " " << cmd.symbol;
+        if (cmd.price_type == "limit") std::cout << " по $" << cmd.price;
+        std::cout << "\n" << Color::RESET;
+        
+        auto validation = m_validator->validateOrder(cmd, context);
+        if (!validation.is_valid) {
+            std::cout << Color::RED << "❌ Валидация: " << validation.error_message << "\n" << Color::RESET;
+            m_audit->logOrder(cmd, "REJECTED", validation.error_message);
+            return;
+        }
+        
+        for (auto& w : validation.warnings) {
+            std::cout << Color::YELLOW << "⚠ " << w << "\n" << Color::RESET;
+        }
+        
+        // Dry-run: предпросмотр
+        if (m_config->mode == TradingMode::DRY_RUN) {
+            printOrderPreview(cmd);
+            m_audit->logOrder(cmd, "DRY_RUN", "симуляция");
+            return;
+        }
+        
+        // Live: подтверждение
+        std::cout << Color::YELLOW << "\n⚠ Подтвердите (yes/no): " << Color::RESET;
+        std::string confirm;
+        std::getline(std::cin, confirm);
+        if (confirm != "yes" && confirm != "y") {
+            std::cout << "Отменено.\n";
+            m_audit->logOrder(cmd, "CANCELLED", "пользователь");
+            return;
+        }
+        
+        auto result = executeOrder(cmd);
+        if (result.status == OrderStatus::FILLED) {
+            std::cout << Color::GREEN << "✅ Исполнено! ID: " << result.order_id << "\n" << Color::RESET;
+            m_validator->registerTrade(result.filled_value * 0.001);  // ~P&L оценка
+        } else {
+            std::cout << Color::RED << "❌ " << result.error_msg << "\n" << Color::RESET;
+        }
+        
+    } catch (const std::exception& e) {
+        std::cout << Color::RED << "❌ Ошибка: " << e.what() << "\n" << Color::RESET;
+        m_audit->logError(input, e.what());
+    }
+}
+
+// ============================================================================
+// Предпросмотр ордера
 // ============================================================================
 void CLI::printOrderPreview(const OrderCommand& cmd) {
     std::cout << Color::CYAN << "\n╔══════════════════════════════════════════════╗\n";
-    std::cout << "║        ПРЕДПРОСМОТР ОРДЕРА (DRY-RUN)        ║\n";
+    std::cout << "║        ПРЕДПРОСМОТР (DRY-RUN)                ║\n";
     std::cout << "╚══════════════════════════════════════════════╝\n" << Color::RESET;
     
-    std::cout << "  📋 Детали ордера:\n";
-    std::cout << "     " << (cmd.action == "buy" ? "Покупка" : "Продажа") 
+    std::cout << "  " << (cmd.action == "buy" ? "Покупка" : "Продажа")
               << " " << cmd.amount << " " << cmd.symbol << "\n";
-    std::cout << "     Тип: " << (cmd.price_type == "market" ? "Рыночный" : "Лимитный") << "\n";
+    std::cout << "  Тип: " << (cmd.price_type == "market" ? "Рыночный" : "Лимитный") << "\n";
     
-    // Симулируем расчёт комиссии
-    double fee_rate = 0.002;  // 0.2% комиссия CoinEx
-    double estimated_fee = cmd.amount * fee_rate;
+    double fee = cmd.amount * CoinExConfig::DEFAULT_FEE_RATE;
+    std::cout << "  Комиссия: ~" << fee << "\n";
     
-    std::cout << "\n  💰 Расчёт комиссии:\n";
-    std::cout << "     Ставка: " << (fee_rate * 100) << "%\n";
-    std::cout << "     Комиссия: ≈ " << std::fixed << std::setprecision(6) << estimated_fee << " " 
-              << (cmd.symbol.find('/') != std::string::npos ? cmd.symbol.substr(0, cmd.symbol.find('/')) : cmd.symbol) << "\n";
+    if (cmd.take_profit > 0) std::cout << "  Тейк: +" << cmd.take_profit << "%\n";
+    if (cmd.stop_loss > 0)   std::cout << "  Стоп: -" << cmd.stop_loss << "%\n";
     
-    if (cmd.take_profit > 0 || cmd.stop_loss > 0) {
-        std::cout << "\n  🎯 Уровни:\n";
-        if (cmd.take_profit > 0) {
-            std::cout << "     Тейк-профит: +" << cmd.take_profit << "%\n";
-        }
-        if (cmd.stop_loss > 0) {
-            std::cout << "     Стоп-лимит:  -" << cmd.stop_loss << "%\n";
-        }
-    }
-    
-    std::cout << Color::GREEN << "\n  ✅ Ордер проверен. Реальных торгов не производилось.\n" << Color::RESET;
+    std::cout << Color::GREEN << "\n  ✅ Проверено. Торгов не было.\n" << Color::RESET;
 }
 
 // ============================================================================
-// Исполнение ордера (live)
+// Исполнение ордера
 // ============================================================================
 OrderResult CLI::executeOrder(const OrderCommand& cmd) {
-    std::cout << Color::YELLOW << "📤 Отправка ордера на CoinEx...\n" << Color::RESET;
+    std::cout << Color::YELLOW << "📤 Отправка на CoinEx...\n" << Color::RESET;
     
     try {
-        OrderResult result = m_exchange->placeOrder(cmd);
-        m_audit->logCommand(cmd, result.status == OrderStatus::FILLED ? "FILLED" : "FAILED", 
-                           result.error_msg);
+        auto result = m_exchange->placeOrder(cmd);
+        m_audit->logOrder(cmd,
+            result.status == OrderStatus::FILLED ? "FILLED" : "FAILED",
+            result.error_msg, result.order_id);
         return result;
     } catch (const std::exception& e) {
-        OrderResult error_result;
-        error_result.status = OrderStatus::REJECTED;
-        error_result.error_msg = e.what();
-        m_audit->logCommand(cmd, "ERROR", e.what());
-        return error_result;
+        OrderResult err;
+        err.status = OrderStatus::REJECTED;
+        err.error_msg = e.what();
+        m_audit->logOrder(cmd, "ERROR", e.what());
+        return err;
+    }
+}
+
+// ============================================================================
+// СТРАТЕГ: переключение режимов
+// ============================================================================
+void CLI::switchToSemiAuto() {
+    if (!m_llm->isAvailable()) {
+        std::cout << Color::RED << "Нужен ключ DeepSeek. Установите DEEPSEEK_API_KEY.\n" << Color::RESET;
+        return;
+    }
+    
+    m_config->strat_mode = StrategistMode::SEMI_AUTO;
+    std::cout << Color::YELLOW << "\n🔄 Стратег-Советник запущен.\n";
+    std::cout << "DeepSeek анализирует рынок и предлагает сделки.\n";
+    std::cout << "Вы подтверждаете каждую. 'стоп' — остановить.\n" << Color::RESET;
+    
+    startStrategistLoop();
+}
+
+void CLI::switchToFullAuto() {
+    if (!m_llm->isAvailable()) {
+        std::cout << Color::RED << "Нужен ключ DeepSeek.\n" << Color::RESET;
+        return;
+    }
+    
+    if (m_config->mode == TradingMode::LIVE) {
+        std::cout << Color::RED << "\n⚠ АВТО-РЕЖИМ + LIVE! Средства под управлением AI!\n";
+        std::cout << "Подтвердите (yes/no): " << Color::RESET;
+        std::string c;
+        std::getline(std::cin, c);
+        if (c != "yes" && c != "y") {
+            std::cout << "Отмена.\n";
+            return;
+        }
+    }
+    
+    m_config->strat_mode = StrategistMode::FULL_AUTO;
+    std::cout << Color::RED << "\n🤖 АВТО-СТРАТЕГ АКТИВЕН!\n";
+    std::cout << "DeepSeek торгует самостоятельно. Вы можете давать инструкции в чате.\n";
+    std::cout << "'стоп' — остановить, 'статус' — сводка, любой текст — чат с AI.\n" << Color::RESET;
+    
+    startStrategistLoop();
+}
+
+void CLI::switchToManual() {
+    stopStrategistLoop();
+    m_config->strat_mode = StrategistMode::MANUAL;
+    std::cout << Color::GREEN << "Ручной режим.\n" << Color::RESET;
+}
+
+// ============================================================================
+// Цикл стратега
+// ============================================================================
+void CLI::startStrategistLoop() {
+    if (m_strategist_running) return;
+    
+    m_strategist_running = true;
+    m_strategist_thread = std::make_unique<std::thread>([this]() {
+        while (m_strategist_running && m_running) {
+            strategistIteration();
+            
+            // Ждём интервал
+            for (int i = 0; i < m_strategy.analysis_interval_sec && m_strategist_running; ++i) {
+                SysUtil::sleepMs(1000);
+            }
+        }
+    });
+    
+    m_audit->logSystemEvent("strategist_start",
+        m_config->strat_mode == StrategistMode::SEMI_AUTO ? "semi_auto" : "full_auto");
+}
+
+void CLI::stopStrategistLoop() {
+    m_strategist_running = false;
+    if (m_strategist_thread && m_strategist_thread->joinable()) {
+        m_strategist_thread->join();
+        m_strategist_thread.reset();
+    }
+    m_audit->logSystemEvent("strategist_stop", "ok");
+}
+
+// ============================================================================
+// Одна итерация стратега
+// ============================================================================
+void CLI::strategistIteration() {
+    try {
+        // Шаг 1: Получаем контекст рынка
+        auto context = m_exchange->getMarketContext();
+        context.daily_pnl = m_validator->getDailyPnL();
+        context.daily_trades = m_validator->getDailyTrades();
+        
+        // Шаг 2: Запрашиваем решение у DeepSeek
+        auto limits = m_validator->getLimits();
+        auto decision = m_llm->analyzeMarket(context, m_strategy, limits);
+        
+        // Шаг 3: Логируем
+        m_audit->logStrategistDecision(decision, "analyzed");
+        
+        // Шаг 4: Если hold — пропускаем
+        if (!decision.should_act) {
+            if (!decision.reasoning.empty()) {
+                std::cout << Color::DIM << "  [Стратег] " << decision.reasoning 
+                          << Color::RESET << "\n";
+            }
+            return;
+        }
+        
+        // Шаг 5: Показываем решение
+        printStrategistDecision(decision);
+        
+        // Шаг 6: Валидация
+        auto validation = m_validator->validateStrategistDecision(
+            decision, context, m_strategy);
+        
+        if (!validation.is_valid) {
+            std::cout << Color::RED << "  ❌ Валидация: " << validation.error_message 
+                      << Color::RESET << "\n";
+            m_audit->logStrategistDecision(decision, "rejected");
+            return;
+        }
+        
+        for (auto& w : validation.warnings) {
+            std::cout << Color::YELLOW << "  ⚠ " << w << Color::RESET << "\n";
+        }
+        
+        // Шаг 7: Исполнение
+        if (m_config->strat_mode == StrategistMode::SEMI_AUTO) {
+            // Полуавтомат — запрос подтверждения
+            std::cout << Color::YELLOW << "\n  Подтвердить? (yes/no/skip): " << Color::RESET;
+            std::string confirm;
+            std::getline(std::cin, confirm);
+            
+            if (confirm == "skip") {
+                std::cout << "  Пропущено.\n";
+                m_audit->logStrategistDecision(decision, "skipped");
+                return;
+            }
+            if (confirm != "yes" && confirm != "y") {
+                std::cout << "  Отклонено.\n";
+                m_audit->logStrategistDecision(decision, "declined");
+                return;
+            }
+        }
+        
+        // Исполняем
+        bool ok = executeStrategistDecision(decision);
+        if (ok) {
+            m_audit->logStrategistDecision(decision, "executed");
+        }
+        
+    } catch (const std::exception& e) {
+        std::cerr << Color::RED << "  [Стратег] Ошибка: " << e.what() << Color::RESET << "\n";
+        m_audit->logError("strategist_iteration", e.what());
+        m_validator->registerError();
+    }
+}
+
+// ============================================================================
+// Вывод решения стратега
+// ============================================================================
+void CLI::printStrategistDecision(const StrategistDecision& d) {
+    std::cout << "\n" << Color::CYAN << "╔══════════════════════════════════════════╗\n";
+    std::cout << "║        РЕШЕНИЕ СТРАТЕГА (DeepSeek)       ║\n";
+    std::cout << "╚══════════════════════════════════════════╝\n" << Color::RESET;
+    
+    std::string action_str;
+    if (d.action == "buy")  action_str = Color::GREEN + "ПОКУПКА" + Color::RESET;
+    else if (d.action == "sell") action_str = Color::RED + "ПРОДАЖА" + Color::RESET;
+    else if (d.action == "cancel") action_str = Color::YELLOW + "ОТМЕНА" + Color::RESET;
+    else action_str = "HOLD";
+    
+    std::cout << "  Действие:    " << action_str << "\n";
+    
+    if (d.action == "buy" || d.action == "sell") {
+        std::cout << "  Пара:        " << d.symbol << "\n";
+        std::cout << "  Объём:       " << d.amount << "\n";
+        std::cout << "  Тип:         " << d.price_type << "\n";
+        if (d.price > 0) std::cout << "  Цена:        $" << d.price << "\n";
+        if (d.take_profit > 0) std::cout << "  Тейк:        +" << d.take_profit << "%\n";
+        if (d.stop_loss > 0)   std::cout << "  Стоп:        -" << d.stop_loss << "%\n";
+    }
+    
+    if (d.action == "cancel") {
+        std::cout << "  Отмена:      " << d.cancel_order_ids.size() << " ордеров\n";
+    }
+    
+    std::cout << "  Уверенность: " << (d.confidence * 100) << "%\n";
+    std::cout << "  Стратегия:   " << d.strategy_name << "\n";
+    std::cout << "  Причина:     " << d.reasoning << "\n";
+}
+
+// ============================================================================
+// Исполнение решения стратега
+// ============================================================================
+bool CLI::executeStrategistDecision(const StrategistDecision& d) {
+    try {
+        if (d.action == "cancel") {
+            // Отмена ордеров
+            for (size_t i = 0; i < d.cancel_order_ids.size(); ++i) {
+                (void)i;  // отмена всех ордеров (по ID — TODO)
+                m_exchange->cancelAllOrders();
+            }
+            std::cout << Color::GREEN << "  ✅ Ордера отменены.\n" << Color::RESET;
+            return true;
+        }
+        
+        if (d.action == "buy" || d.action == "sell") {
+            OrderCommand cmd;
+            cmd.action      = d.action;
+            cmd.symbol      = d.symbol;
+            cmd.market_type = CoinExConfig::MARKET_TYPE_SPOT;
+            cmd.amount      = d.amount;
+            cmd.price_type  = d.price_type;
+            cmd.price       = d.price;
+            cmd.take_profit = d.take_profit;
+            cmd.stop_loss   = d.stop_loss;
+            cmd.reason      = d.reasoning;
+            
+            if (m_config->mode == TradingMode::DRY_RUN) {
+                auto result = m_exchange->simulateOrder(cmd);
+                std::cout << Color::GREEN << "  ✅ [DRY] " << d.action << " " 
+                          << d.amount << " " << d.symbol 
+                          << " | ID: " << result.order_id << Color::RESET << "\n";
+                m_audit->logOrder(cmd, "DRY_RUN", "стратег", result.order_id);
+                return true;
+            }
+            
+            auto result = m_exchange->placeOrder(cmd);
+            if (result.status == OrderStatus::FILLED) {
+                std::cout << Color::GREEN << "  ✅ Исполнено! ID: " << result.order_id 
+                          << Color::RESET << "\n";
+                m_audit->logOrder(cmd, "FILLED", "стратег", result.order_id);
+                return true;
+            } else {
+                std::cout << Color::RED << "  ❌ " << result.error_msg << Color::RESET << "\n";
+                m_audit->logOrder(cmd, "FAILED", result.error_msg);
+                return false;
+            }
+        }
+        
+        return false;
+        
+    } catch (const std::exception& e) {
+        std::cerr << Color::RED << "  ❌ Ошибка: " << e.what() << Color::RESET << "\n";
+        m_audit->logError("strategist_execute", e.what());
+        return false;
     }
 }

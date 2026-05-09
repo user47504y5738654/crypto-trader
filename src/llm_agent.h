@@ -2,54 +2,21 @@
 #define LLM_AGENT_H
 
 /*
- * llm_agent.h — Заголовочный файл LLM-агента
+ * llm_agent.h — DeepSeek LLM агент (парсер + стратег)
  * 
- * Отвечает за:
- *   - Формирование промпта для DeepSeek
- *   - Отправку запросов к DeepSeek API
- *   - Парсинг JSON-ответа в структуру OrderCommand
- *   - Обработку ошибок и повторные попытки
+ * Два режима работы:
+ *   1. PARSER (MANUAL) — преобразует команды пользователя в структуру OrderCommand
+ *   2. STRATEGIST (SEMI_AUTO / FULL_AUTO) — анализирует рынок и принимает
+ *      самостоятельные торговые решения, возвращает StrategistDecision
  */
 
 #include "config.h"
+
 #include <string>
 #include <functional>
-#include <nlohmann/json.hpp>  // nlohmann/json
+#include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
-
-// ============================================================================
-// Структура контекста рынка (передаётся в LLM)
-// ============================================================================
-struct MarketContext {
-    double btc_price = 0.0;
-    double eth_price = 0.0;
-    double sol_price = 0.0;
-    // Можно добавить другие активы
-    
-    double usdt_balance = 0.0;
-    double btc_balance = 0.0;
-    double eth_balance = 0.0;
-    
-    int64_t server_time = 0;  // Время биржи (UNIX timestamp)
-    
-    // Сериализация в JSON для промпта
-    json toJson() const {
-        return {
-            {"prices", {
-                {"BTC/USDT", btc_price},
-                {"ETH/USDT", eth_price},
-                {"SOL/USDT", sol_price}
-            }},
-            {"balances", {
-                {"USDT", usdt_balance},
-                {"BTC", btc_balance},
-                {"ETH", eth_balance}
-            }},
-            {"server_time", server_time}
-        };
-    }
-};
 
 // ============================================================================
 // Класс LLM-агента
@@ -59,39 +26,85 @@ public:
     explicit LLMAgent(const std::string& api_key);
     ~LLMAgent();
     
-    // Основной метод: парсит естественно-языковую команду в структуру
-    OrderCommand parseCommand(const std::string& user_input, 
-                              const MarketContext& context);
+    // ------------------------------------------------------------------------
+    // Режим 1: Парсер команд (MANUAL)
+    // ------------------------------------------------------------------------
+    
+    // Парсит команду на естественном языке в OrderCommand
+    OrderCommand parseCommand(const std::string& user_input,
+                               const MarketContext& context);
+    
+    // ------------------------------------------------------------------------
+    // Режим 2: Стратег (SEMI_AUTO / FULL_AUTO)
+    // ------------------------------------------------------------------------
+    
+    // Стратег анализирует рынок и возвращает решение
+    StrategistDecision analyzeMarket(const MarketContext& context,
+                                      const StrategyConfig& strategy,
+                                      const RiskLimits& limits);
+    
+    // ------------------------------------------------------------------------
+    // Режим 3: Чат (свободное общение + торговые инструкции)
+    // ------------------------------------------------------------------------
+    
+    // Свободный диалог с DeepSeek: отвечает на вопросы, может распознать торговую команду
+    ChatResponse chat(const std::string& user_message,
+                       const MarketContext& context);
+    
+    // ------------------------------------------------------------------------
+    // Общие методы
+    // ------------------------------------------------------------------------
     
     // Проверка доступности API
-    bool isAvailable();
+    bool isAvailable() const;
     
-    // Установка/обновление API ключа
+    // Установка API ключа
     void setApiKey(const std::string& api_key);
     
 private:
-    // Формирование системного промпта
-    std::string buildSystemPrompt();
+    // ------------------------------------------------------------------------
+    // Внутренние методы
+    // ------------------------------------------------------------------------
     
-    // Формирование пользовательского запроса с контекстом
-    std::string buildUserPrompt(const std::string& user_input, 
-                                const MarketContext& context);
+    // Формирование системного промпта для парсера
+    std::string buildParserSystemPrompt();
     
-    // Отправка HTTP запроса к DeepSeek
-    json sendRequest(const std::string& system_prompt, 
-                     const std::string& user_prompt);
+    // Формирование системного промпта для стратега
+    std::string buildStrategistSystemPrompt(const StrategyConfig& strategy,
+                                              const RiskLimits& limits);
     
-    // Парсинг ответа LLM в команду
-    OrderCommand parseResponse(const json& response);
+    // Формирование пользовательского промпта с контекстом рынка
+    std::string buildMarketContextPrompt(const MarketContext& context);
     
-    // Валидация JSON-схемы ответа
-    bool validateSchema(const json& data);
+    // Отправка запроса к DeepSeek API
+    json sendDeepSeekRequest(const std::string& system_prompt,
+                               const std::string& user_prompt,
+                               int max_tokens,
+                               double temperature);
     
-    // API ключ DeepSeek
+    // Парсинг ответа в OrderCommand
+    OrderCommand parseOrderCommand(const json& response);
+    
+    // Парсинг ответа в StrategistDecision
+    StrategistDecision parseStrategistDecision(const json& response);
+    
+    // Валидация JSON-схемы ответа парсера
+    bool validateParserSchema(const json& data);
+    
+    // Валидация JSON-схемы ответа стратега
+    bool validateStrategistSchema(const json& data);
+    
+    // Формирование системного промпта для чата
+    std::string buildChatSystemPrompt();
+    
+    // Парсинг ответа чата
+    ChatResponse parseChatResponse(const json& response);
+    
+    // ------------------------------------------------------------------------
+    // Поля
+    // ------------------------------------------------------------------------
+    
     std::string m_api_key;
-    
-    // Счётчик попыток
-    int m_retry_count = 0;
     static constexpr int MAX_RETRIES = 3;
 };
 

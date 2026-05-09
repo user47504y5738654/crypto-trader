@@ -2,18 +2,16 @@
 #define EXCHANGE_CLIENT_H
 
 /*
- * exchange_client.h — Клиент для работы с CoinEx API
+ * exchange_client.h — Клиент CoinEx API v2
  * 
- * Отвечает за:
- *   - Подпись запросов HMAC-SHA256
- *   - Получение баланса и цен
- *   - Отправку ордеров
- *   - Обработку ошибок API
- *   - Dry-run симуляцию
+ * Полностью совместим с API v2 (документация: https://docs.coinex.com/api/v2/):
+ *   - HMAC-SHA256 подпись: method + path[?query] + body + timestamp (без \n)
+ *   - Все значения amount/price — строки
+ *   - Обязательный market_type = "SPOT"
+ *   - Заголовки: X-COINEX-KEY, X-COINEX-SIGN, X-COINEX-TIMESTAMP
  */
 
 #include "config.h"
-#include "llm_agent.h"
 
 #include <string>
 #include <map>
@@ -21,85 +19,108 @@
 #include <mutex>
 
 // ============================================================================
-// Структура баланса
-// ============================================================================
-struct Balance {
-    double available = 0.0;
-    double frozen = 0.0;
-};
-
-// ============================================================================
-// Статистика dry-run симуляции
-// ============================================================================
-struct DryRunStats {
-    int total_trades = 0;
-    int successful_trades = 0;
-    double total_profit = 0.0;
-};
-
-// ============================================================================
-// Класс клиента биржи
+// Класс клиента CoinEx API v2
 // ============================================================================
 class ExchangeClient {
 public:
-    ExchangeClient(const std::string& api_key, const std::string& api_secret);
+    ExchangeClient(const std::string& access_id, const std::string& secret_key);
     ~ExchangeClient();
     
-    // Получение баланса всех валют
-    std::map<std::string, Balance> getBalance();
+    // ------------------------------------------------------------------------
+    // Публичные методы
+    // ------------------------------------------------------------------------
     
-    // Получение текущей цены тикера
-    double getTickerPrice(const std::string& symbol);
+    // Получение баланса спотового аккаунта
+    std::map<std::string, Balance> getSpotBalance();
     
-    // Получение контекста рынка (для LLM)
-    MarketContext getMarketContext();
+    // Получение тикеров (один или несколько)
+    std::map<std::string, Ticker> getTickers(const std::vector<std::string>& symbols = {});
+    
+    // Получение списка доступных рынков
+    std::vector<std::string> getMarketList();
+    
+    // Получение открытых ордеров
+    std::vector<OrderResult> getPendingOrders(const std::string& market = "",
+                                               const std::string& side = "");
+    
+    // Получение завершённых ордеров
+    std::vector<OrderResult> getFinishedOrders(const std::string& market = "",
+                                                const std::string& side = "",
+                                                int limit = 20);
     
     // Размещение ордера
     OrderResult placeOrder(const OrderCommand& cmd);
     
-    // Получение статуса ордера
-    OrderStatus getOrderStatus(const std::string& order_id);
+    // Отмена всех ордеров (опционально по рынку)
+    bool cancelAllOrders(const std::string& market = "");
     
-    // Отмена ордера
-    bool cancelOrder(const std::string& order_id);
+    // Отмена ордера по ID
+    bool cancelOrder(const std::string& order_id, const std::string& market);
     
-    // Проверка соединения с API
+    // Получение полного контекста рынка (для стратега)
+    MarketContext getMarketContext();
+    
+    // Проверка соединения
     bool isConnected();
     
-    // Получение статистики dry-run
-    DryRunStats getDryRunStats();
+    // Получение времени сервера
+    int64_t getServerTime();
     
-private:
-    // Создание подписи HMAC-SHA256
-    std::string signRequest(const std::string& method, const std::string& path,
-                            const std::string& query_string, const std::string& body,
-                            const std::string& timestamp);
-    
-    // Формирование заголовков для запроса
-    std::map<std::string, std::string> buildHeaders(const std::string& method,
-                                                     const std::string& path,
-                                                     const std::string& body = "");
-    
-    // Отправка HTTP запроса
-    std::string sendHttpRequest(const std::string& method, const std::string& endpoint,
-                                 const std::string& body = "",
-                                 const std::map<std::string, std::string>& headers = {});
-    
-    // Симуляция торговли (dry-run)
+    // Dry-run: симуляция ордера
     OrderResult simulateOrder(const OrderCommand& cmd);
     
-    // API ключи
-    std::string m_api_key;
-    std::string m_api_secret;
+    // Статистика dry-run
+    struct DryRunStats {
+        int total_trades = 0;
+        int successful_trades = 0;
+        double total_profit = 0.0;
+        double total_fees = 0.0;
+    };
+    DryRunStats getDryRunStats() const;
     
-    // Имитация баланса для dry-run
-    std::map<std::string, Balance> m_simulated_balance;
+    // Сброс dry-run статистики
+    void resetDryRunStats();
+    
+private:
+    // ------------------------------------------------------------------------
+    // Приватные методы
+    // ------------------------------------------------------------------------
+    
+    // HMAC-SHA256 подпись (CoinEx API v2 формат)
+    // Формат: method + request_path[?query] + body + timestamp
+    // Результат: lowercase hex (64 символа)
+    std::string createSignature(const std::string& method,
+                                 const std::string& request_path,
+                                 const std::string& body,
+                                 const std::string& timestamp);
+    
+    // Отправка HTTP-запроса
+    std::string httpRequest(const std::string& method,
+                             const std::string& path,
+                             const std::string& body = "",
+                             const std::string& query_string = "");
+    
+    // Парсинг строки в double (безопасно)
+    static double parseDouble(const std::string& s);
+    
+    // Генерация ID клиента
+    static std::string generateClientId();
+    
+    // ------------------------------------------------------------------------
+    // Поля
+    // ------------------------------------------------------------------------
+    
+    std::string m_access_id;       // CoinEx Access ID (API Key)
+    std::string m_secret_key;      // CoinEx Secret Key
+    
+    // Симулированный баланс для dry-run
+    std::map<std::string, Balance> m_sim_balance;
     
     // Статистика dry-run
-    DryRunStats m_dry_run_stats;
+    DryRunStats m_stats;
     
     // Мьютекс
-    std::mutex m_mutex;
+    mutable std::mutex m_mutex;
 };
 
 #endif // EXCHANGE_CLIENT_H

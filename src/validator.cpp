@@ -1,11 +1,11 @@
 /*
- * validator.cpp — Реализация модуля валидации
+ * validator.cpp — Валидация ордеров и риск-контроль
  * 
- * Защита от ошибок и рисков перед отправкой ордера.
- * Работает как "предохранитель" между LLM и биржей.
+ * Проверяет каждый ордер и решение стратега перед отправкой на биржу.
  */
 
 #include "validator.h"
+
 #include <iostream>
 #include <algorithm>
 #include <cmath>
@@ -17,92 +17,65 @@ Validator::Validator() {
     m_day_start = std::chrono::system_clock::now();
 }
 
-// ============================================================================
-// Деструктор
-// ============================================================================
 Validator::~Validator() = default;
 
 // ============================================================================
-// Получение текущих лимитов
+// Лимиты
 // ============================================================================
 RiskLimits Validator::getLimits() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_limits;
 }
 
-// ============================================================================
-// Обновление лимитов
-// ============================================================================
 void Validator::updateLimits(const RiskLimits& limits) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_limits = limits;
 }
 
-// ============================================================================
-// Загрузка лимитов (заглушка — позже подключим SQLite)
-// ============================================================================
 void Validator::loadLimits() {
     std::lock_guard<std::mutex> lock(m_mutex);
-    // TODO: Загружать из SQLite таблицы config
-    // Пока используем значения по умолчанию из config.h
     std::cout << "  [VALIDATOR] Лимиты загружены (по умолчанию)\n";
 }
 
-// ============================================================================
-// Сохранение лимитов (заглушка)
-// ============================================================================
 void Validator::saveLimits(const RiskLimits& limits) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_limits = limits;
-    // TODO: Сохранять в SQLite
 }
 
 // ============================================================================
-// Проверка circuit breaker
+// Circuit breaker
 // ============================================================================
 bool Validator::isCircuitBreakerActive() {
     std::lock_guard<std::mutex> lock(m_mutex);
     
-    if (!m_circuit_breaker_active) {
-        return false;
-    }
+    if (!m_circuit_breaker_active) return false;
     
-    // Проверяем, не прошло ли время паузы
     auto now = std::chrono::steady_clock::now();
     if (now >= m_circuit_breaker_until) {
         m_circuit_breaker_active = false;
         m_error_count = 0;
-        std::cout << "  [VALIDATOR] Circuit breaker сброшен. Торговля возобновлена.\n";
+        std::cout << "  [VALIDATOR] Circuit breaker сброшен.\n";
         return false;
     }
-    
     return true;
 }
 
-// ============================================================================
-// Регистрация ошибки
-// ============================================================================
 void Validator::registerError() {
     std::lock_guard<std::mutex> lock(m_mutex);
     
     m_error_count++;
-    std::cout << "  [VALIDATOR] Ошибка #" << m_error_count 
-              << "/" << m_limits.circuit_breaker_count << "\n";
+    std::cout << "  [VALIDATOR] Ошибка #" << m_error_count
+              << "/" << m_limits.circuit_breaker_errors << "\n";
     
-    if (m_error_count >= m_limits.circuit_breaker_count) {
+    if (m_error_count >= m_limits.circuit_breaker_errors) {
         m_circuit_breaker_active = true;
-        m_circuit_breaker_until = std::chrono::steady_clock::now() + 
-            std::chrono::seconds(m_limits.circuit_breaker_seconds);
-        
-        std::cout << "  [VALIDATOR] ⚠ CIRCUIT BREAKER АКТИВИРОВАН!\n";
-        std::cout << "  [VALIDATOR] Пауза " << m_limits.circuit_breaker_seconds 
-                  << " секунд.\n";
+        m_circuit_breaker_until = std::chrono::steady_clock::now()
+            + std::chrono::seconds(m_limits.circuit_breaker_seconds);
+        std::cout << "  [VALIDATOR] CIRCUIT BREAKER! Пауза "
+                  << m_limits.circuit_breaker_seconds << "с\n";
     }
 }
 
-// ============================================================================
-// Сброс circuit breaker
-// ============================================================================
 void Validator::resetCircuitBreaker() {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_error_count = 0;
@@ -110,160 +83,220 @@ void Validator::resetCircuitBreaker() {
 }
 
 // ============================================================================
-// Проверка дневного лимита убытков
+// Дневной P&L
 // ============================================================================
 bool Validator::checkDailyLossLimit(double potential_loss) {
     std::lock_guard<std::mutex> lock(m_mutex);
     
-    // Сброс в начале нового дня
     auto now = std::chrono::system_clock::now();
     auto diff = std::chrono::duration_cast<std::chrono::hours>(now - m_day_start);
-    
     if (diff.count() >= 24) {
         m_daily_pnl = 0.0;
+        m_daily_trades = 0;
         m_day_start = now;
     }
     
-    double projected_pnl = m_daily_pnl - potential_loss;
-    return projected_pnl >= -m_limits.daily_loss_limit;
+    double projected = m_daily_pnl - potential_loss;
+    return projected >= -m_limits.daily_loss_limit;
 }
 
-// ============================================================================
-// Регистрация сделки для дневного трекинга
-// ============================================================================
-void Validator::registerTrade(double profit_loss) {
+void Validator::registerTrade(double pnl) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_daily_pnl += profit_loss;
+    m_daily_pnl += pnl;
+    m_daily_trades++;
+}
+
+void Validator::resetDailyStats() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_daily_pnl = 0.0;
+    m_daily_trades = 0;
+    m_day_start = std::chrono::system_clock::now();
 }
 
 // ============================================================================
-// Основной метод валидации
+// Валидация ордера (MANUAL)
 // ============================================================================
-ValidationResult Validator::validate(const OrderCommand& cmd, 
-                                      const MarketContext& context) {
+ValidationResult Validator::validateOrder(const OrderCommand& cmd,
+                                            const MarketContext& context) {
     
-    // Проверяем circuit breaker
     if (isCircuitBreakerActive()) {
-        auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
-            m_circuit_breaker_until - std::chrono::steady_clock::now()).count();
-        
-        return {false, "Circuit breaker активен. Осталось " + std::to_string(remaining) + "с паузы.", {}};
+        return {false, "Circuit breaker активен.", {}};
     }
     
-    // 1. Проверка схемы
-    auto schema_result = validateSchema(cmd);
-    if (!schema_result.is_valid) {
-        registerError();
-        return schema_result;
-    }
+    auto schema = validateSchema(cmd);
+    if (!schema.is_valid) { registerError(); return schema; }
     
-    // 2. Проверка безопасности
-    auto safety_result = validateSafety(cmd);
-    if (!safety_result.is_valid) {
-        registerError();
-        return safety_result;
-    }
+    auto safety = validateSafety(cmd);
+    if (!safety.is_valid) { registerError(); return safety; }
     
-    // 3. Проверка цен
-    auto price_result = validatePrices(cmd, context);
-    if (!price_result.is_valid) {
-        return price_result;
-    }
+    auto limits = validateLimits(cmd, context);
+    if (!limits.is_valid) { return limits; }
     
-    // 4. Проверка лимитов
-    auto limits_result = validateLimits(cmd, context);
-    if (!limits_result.is_valid) {
-        return limits_result;
-    }
-    
-    // Сброс счётчика ошибок при успехе
     resetCircuitBreaker();
     
-    // Собираем все предупреждения
     ValidationResult result;
     result.is_valid = true;
-    result.warnings = schema_result.warnings;
-    for (const auto& w : safety_result.warnings) result.warnings.push_back(w);
-    for (const auto& w : price_result.warnings) result.warnings.push_back(w);
-    for (const auto& w : limits_result.warnings) result.warnings.push_back(w);
+    for (auto& w : schema.warnings) result.warnings.push_back(w);
+    for (auto& w : safety.warnings) result.warnings.push_back(w);
+    for (auto& w : limits.warnings) result.warnings.push_back(w);
     
     return result;
 }
 
 // ============================================================================
-// Проверка схемы ордера
+// Валидация решения стратега
+// ============================================================================
+ValidationResult Validator::validateStrategistDecision(
+    const StrategistDecision& decision,
+    const MarketContext& context,
+    const StrategyConfig& strategy) {
+    
+    if (isCircuitBreakerActive()) {
+        return {false, "Circuit breaker активен.", {}};
+    }
+    
+    ValidationResult result;
+    
+    // Если стратег решил ничего не делать — ок
+    if (!decision.should_act) return result;
+    
+    // Проверка уверенности
+    if (decision.confidence < strategy.min_confidence) {
+        result.warnings.push_back(
+            "Уверенность стратега (" + std::to_string(decision.confidence) +
+            ") ниже порога (" + std::to_string(strategy.min_confidence) + ")");
+    }
+    
+    if (decision.confidence < m_limits.min_auto_confidence && 
+        decision.action != "cancel") {
+        result.is_valid = false;
+        result.error_message = "Уверенность стратега слишком низкая для авто-сделки";
+        return result;
+    }
+    
+    // Для cancel — проверяем список ордеров
+    if (decision.action == "cancel") {
+        if (decision.cancel_order_ids.empty()) {
+            result.warnings.push_back("Стратег выбрал cancel, но список пуст");
+        }
+        return result;
+    }
+    
+    // Для buy/sell — валидация как обычный ордер
+    OrderCommand cmd;
+    cmd.action = decision.action;
+    cmd.symbol = decision.symbol;
+    cmd.amount = decision.amount;
+    cmd.market_type = CoinExConfig::MARKET_TYPE_SPOT;
+    cmd.price_type = decision.price_type;
+    cmd.price = decision.price;
+    
+    auto schema = validateSchema(cmd);
+    if (!schema.is_valid) { registerError(); return schema; }
+    
+    auto safety = validateSafety(cmd);
+    if (!safety.is_valid) { registerError(); return safety; }
+    
+    auto limits = validateLimits(cmd, context);
+    if (!limits.is_valid) return limits;
+    
+    // Проверка дневного количества сделок
+    if (m_daily_trades >= strategy.max_daily_trades) {
+        result.warnings.push_back("Достигнут лимит дневных сделок");
+    }
+    
+    // Проверка позиции (% от портфеля)
+    double total_usd = 0.0;
+    for (const auto& [ccy, bal] : context.balances) {
+        if (ccy == "USDT" || ccy == "USDC") {
+            total_usd += bal.total();
+        } else {
+            auto it = context.tickers.find(ccy + "USDT");
+            if (it != context.tickers.end()) {
+                total_usd += bal.total() * it->second.last;
+            }
+        }
+    }
+    
+    if (total_usd > 0) {
+        double order_value = cmd.amount;
+        auto it = context.tickers.find(cmd.symbol);
+        if (it != context.tickers.end()) {
+            order_value *= it->second.last;
+        }
+        double pct = order_value / total_usd * 100.0;
+        if (pct > strategy.max_position_percent) {
+            result.warnings.push_back(
+                "Размер позиции (" + std::to_string(pct) +
+                "%) превышает лимит стратегии (" +
+                std::to_string(strategy.max_position_percent) + "%)");
+        }
+    }
+    
+    resetCircuitBreaker();
+    return result;
+}
+
+// ============================================================================
+// Валидация схемы
 // ============================================================================
 ValidationResult Validator::validateSchema(const OrderCommand& cmd) {
     ValidationResult result;
     
-    // Проверка действия
     if (cmd.action != "buy" && cmd.action != "sell") {
         result.is_valid = false;
-        result.error_message = "Неизвестное действие: " + cmd.action + ". Допустимо: buy/sell.";
+        result.error_message = "Действие должно быть buy/sell: " + cmd.action;
         return result;
     }
     
-    // Проверка символа
     if (cmd.symbol.empty()) {
         result.is_valid = false;
-        result.error_message = "Не указана торговая пара (symbol).";
+        result.error_message = "Не указана торговая пара";
         return result;
     }
     
-    // Проверка: только спот (нет USDT/USDT и т.п.)
-    if (cmd.symbol.find('/') == std::string::npos) {
-        result.is_valid = false;
-        result.error_message = "Неверный формат пары. Нужно: BTC/USDT, ETH/USDT и т.д.";
-        return result;
-    }
-    
-    // Проверка объёма
     if (cmd.amount <= 0) {
         result.is_valid = false;
-        result.error_message = "Объём должен быть положительным числом.";
+        result.error_message = "Объём должен быть > 0";
         return result;
     }
     
-    // Проверка типа цены
     if (cmd.price_type != "market" && cmd.price_type != "limit") {
         result.is_valid = false;
-        result.error_message = "Тип цены должен быть 'market' или 'limit'.";
+        result.error_message = "Тип цены: market или limit";
         return result;
     }
     
-    // Для лимитных ордеров цена обязательна
     if (cmd.price_type == "limit" && cmd.price <= 0) {
         result.is_valid = false;
-        result.error_message = "Для лимитного ордера укажите цену.";
+        result.error_message = "Для лимитного ордера нужна цена";
         return result;
     }
     
-    // Проверка тейков/стопов
     if (cmd.take_profit < 0) {
-        result.warnings.push_back("Тейк-профит не может быть отрицательным. Установлен в 0.");
+        result.warnings.push_back("Тейк-профит < 0 — установлен в 0");
     }
     if (cmd.stop_loss < 0) {
-        result.warnings.push_back("Стоп-лосс не может быть отрицательным. Установлен в 0.");
+        result.warnings.push_back("Стоп-лосс < 0 — установлен в 0");
     }
     
     return result;
 }
 
 // ============================================================================
-// Проверка безопасности
+// Валидация безопасности
 // ============================================================================
 ValidationResult Validator::validateSafety(const OrderCommand& cmd) {
     ValidationResult result;
     
-    // Запрет фьючерсов и маржи
-    std::string lower_symbol = cmd.symbol;
-    std::transform(lower_symbol.begin(), lower_symbol.end(), lower_symbol.begin(), ::tolower);
+    std::string lower = cmd.symbol;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
     
-    if (lower_symbol.find("perp") != std::string::npos ||
-        lower_symbol.find("futures") != std::string::npos ||
-        lower_symbol.find("margin") != std::string::npos) {
+    if (lower.find("perp") != std::string::npos ||
+        lower.find("futures") != std::string::npos ||
+        lower.find("margin") != std::string::npos) {
         result.is_valid = false;
-        result.error_message = "БЛОКИРОВКА: Фьючерсы и маржинальная торговля запрещены. Только спот.";
+        result.error_message = "Фьючерсы/маржа запрещены. Только спот.";
         return result;
     }
     
@@ -271,93 +304,63 @@ ValidationResult Validator::validateSafety(const OrderCommand& cmd) {
 }
 
 // ============================================================================
-// Проверка цен
+// Валидация лимитов
 // ============================================================================
-ValidationResult Validator::validatePrices(const OrderCommand& cmd, 
+ValidationResult Validator::validateLimits(const OrderCommand& cmd,
                                             const MarketContext& context) {
     ValidationResult result;
     
-    if (cmd.price_type != "limit") {
-        return result;  // Рыночные ордера не проверяем по цене
+    // Оценка стоимости ордера
+    double price = 0.0;
+    auto it = context.tickers.find(cmd.symbol);
+    if (it != context.tickers.end()) {
+        price = it->second.last;
     }
     
-    // Получаем текущую рыночную цену
-    double market_price = 0.0;
-    if (cmd.symbol == "BTC/USDT") market_price = context.btc_price;
-    else if (cmd.symbol == "ETH/USDT") market_price = context.eth_price;
-    else if (cmd.symbol == "SOL/USDT") market_price = context.sol_price;
+    double estimated = cmd.amount * price;
     
-    if (market_price <= 0) {
-        result.warnings.push_back("Не удалось получить рыночную цену для " + cmd.symbol);
+    // Макс. ордер
+    if (estimated > m_limits.max_order_usd) {
+        result.is_valid = false;
+        result.error_message = "Ордер $" + std::to_string(estimated) +
+            " превышает лимит $" + std::to_string(m_limits.max_order_usd);
         return result;
     }
     
-    // Проверяем отклонение
-    double deviation = std::abs(cmd.price - market_price) / market_price * 100.0;
+    // Дневной убыток
+    if (!checkDailyLossLimit(estimated)) {
+        result.is_valid = false;
+        result.error_message = "Дневной лимит убытков исчерпан";
+        return result;
+    }
     
-    if (deviation > m_limits.max_market_deviation) {
-        result.warnings.push_back(
-            "⚠ Цена лимитного ордера отклоняется от рынка на " + 
-            std::to_string(deviation) + "% (макс. " + 
-            std::to_string(m_limits.max_market_deviation) + "%)");
+    // Баланс для покупки
+    if (cmd.action == "buy") {
+        auto bal_it = context.balances.find("USDT");
+        double available = (bal_it != context.balances.end()) 
+            ? bal_it->second.available : 0.0;
         
-        // Если отклонение слишком большое (>10%) — блокируем
-        if (deviation > 10.0) {
+        if (estimated > available) {
             result.is_valid = false;
-            result.error_message = "Цена ордера отклоняется от рынка более чем на 10%. Заблокировано.";
+            result.error_message = "Недостаточно USDT: нужно $" +
+                std::to_string(estimated) + ", доступно $" +
+                std::to_string(available);
             return result;
         }
-    }
-    
-    return result;
-}
-
-// ============================================================================
-// Проверка лимитов
-// ============================================================================
-ValidationResult Validator::validateLimits(const OrderCommand& cmd, 
-                                            const MarketContext& context) {
-    ValidationResult result;
-    
-    // Оцениваем стоимость ордера в USDT
-    double estimated_order_usd = 0.0;
-    double market_price = 0.0;
-    
-    if (cmd.symbol == "BTC/USDT") market_price = context.btc_price;
-    else if (cmd.symbol == "ETH/USDT") market_price = context.eth_price;
-    else if (cmd.symbol == "SOL/USDT") market_price = context.sol_price;
-    
-    if (cmd.action == "buy") {
-        // Для покупки: amount в базовой валюте * цена
-        estimated_order_usd = cmd.amount * market_price;
     } else {
-        // Для продажи: amount в базовой валюте * цена (получаем USDT)
-        estimated_order_usd = cmd.amount * market_price;
-    }
-    
-    // Проверка макс. размера ордера
-    if (estimated_order_usd > m_limits.max_order_usd) {
-        result.is_valid = false;
-        result.error_message = "Стоимость ордера ($" + std::to_string(estimated_order_usd) + 
-            ") превышает лимит ($" + std::to_string(m_limits.max_order_usd) + ").";
-        return result;
-    }
-    
-    // Проверка дневного лимита убытков
-    if (!checkDailyLossLimit(estimated_order_usd)) {
-        result.is_valid = false;
-        result.error_message = "Достигнут дневной лимит убытков.";
-        return result;
-    }
-    
-    // Проверка баланса (для покупки)
-    if (cmd.action == "buy" && market_price > 0) {
-        double required_usdt = cmd.amount * market_price;
-        if (required_usdt > context.usdt_balance) {
+        // Для продажи — проверяем базовую валюту
+        std::string base = cmd.symbol;
+        if (base.length() > 4) base = base.substr(0, base.length() - 4);
+        
+        auto bal_it = context.balances.find(base);
+        double available = (bal_it != context.balances.end())
+            ? bal_it->second.available : 0.0;
+        
+        if (cmd.amount > available) {
             result.is_valid = false;
-            result.error_message = "Недостаточно USDT. Нужно: " + 
-                std::to_string(required_usdt) + ", доступно: " + 
-                std::to_string(context.usdt_balance);
+            result.error_message = "Недостаточно " + base + ": нужно " +
+                std::to_string(cmd.amount) + ", доступно " +
+                std::to_string(available);
             return result;
         }
     }

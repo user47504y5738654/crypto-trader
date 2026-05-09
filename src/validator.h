@@ -2,18 +2,17 @@
 #define VALIDATOR_H
 
 /*
- * validator.h — Модуль валидации и риск-контроля
+ * validator.h — Валидатор ордеров и риск-контроль
  * 
- * Отвечает за:
- *   - Проверку схемы ордера (Pydantic-подобная валидация)
- *   - Сверку с лимитами (баланс, дневной убыток, макс. позиции)
- *   - Проверку цен на отклонение от рынка
- *   - Circuit breaker (автопауза при ошибках)
- *   - Блокировку опасных действий (фьючерсы, маржа)
+ * Проверяет ордера перед отправкой на биржу:
+ *   1. Схема ордера
+ *   2. Безопасность (только спот)
+ *   3. Лимиты (баланс, дневной убыток, экспозиция)
+ *   4. Решения стратега (min confidence, max exposure)
+ *   5. Circuit breaker
  */
 
 #include "config.h"
-#include "llm_agent.h"
 
 #include <string>
 #include <chrono>
@@ -25,73 +24,70 @@
 struct ValidationResult {
     bool is_valid = true;
     std::string error_message;
-    std::vector<std::string> warnings;  // Предупреждения (не блокирующие)
+    std::vector<std::string> warnings;
 };
 
 // ============================================================================
-// Класс валидатора
+// Валидатор
 // ============================================================================
 class Validator {
 public:
     Validator();
     ~Validator();
     
-    // Основной метод валидации
-    ValidationResult validate(const OrderCommand& cmd, const MarketContext& context);
+    // Валидация ордера (для MANUAL режима)
+    ValidationResult validateOrder(const OrderCommand& cmd,
+                                    const MarketContext& context);
     
-    // Загрузка лимитов из SQLite
+    // Валидация решения стратега (для SEMI_AUTO / FULL_AUTO)
+    ValidationResult validateStrategistDecision(const StrategistDecision& decision,
+                                                  const MarketContext& context,
+                                                  const StrategyConfig& strategy);
+    
+    // Загрузка/сохранение лимитов
     void loadLimits();
-    
-    // Сохранение лимитов
     void saveLimits(const RiskLimits& limits);
     
-    // Получение текущих лимитов
+    // Получение/установка лимитов
     RiskLimits getLimits() const;
-    
-    // Обновление лимитов
     void updateLimits(const RiskLimits& limits);
     
-    // Проверка circuit breaker
+    // Circuit breaker
     bool isCircuitBreakerActive();
-    
-    // Регистрация ошибки для circuit breaker
     void registerError();
-    
-    // Сброс circuit breaker
     void resetCircuitBreaker();
     
-    // Проверка дневного лимита убытков
+    // Дневной P&L
     bool checkDailyLossLimit(double potential_loss);
+    void registerTrade(double pnl);
     
-    // Регистрация сделки для дневного трекинга
-    void registerTrade(double profit_loss);
+    // Сброс дневной статистики
+    void resetDailyStats();
+    
+    // Текущий дневной P&L
+    double getDailyPnL() const { return m_daily_pnl; }
+    int getDailyTrades() const { return m_daily_trades; }
     
 private:
-    // Проверка базовой схемы
+    // Уровни валидации
     ValidationResult validateSchema(const OrderCommand& cmd);
-    
-    // Проверка лимитов
-    ValidationResult validateLimits(const OrderCommand& cmd, const MarketContext& context);
-    
-    // Проверка цен
-    ValidationResult validatePrices(const OrderCommand& cmd, const MarketContext& context);
-    
-    // Блокировка опасных действий
     ValidationResult validateSafety(const OrderCommand& cmd);
+    ValidationResult validateLimits(const OrderCommand& cmd,
+                                     const MarketContext& context);
     
-    // Лимиты безопасности
+    // Лимиты
     RiskLimits m_limits;
     
     // Circuit breaker
     int m_error_count = 0;
-    std::chrono::steady_clock::time_point m_circuit_breaker_until;
     bool m_circuit_breaker_active = false;
+    std::chrono::steady_clock::time_point m_circuit_breaker_until;
     
-    // Дневной трекинг
+    // Дневная статистика
     double m_daily_pnl = 0.0;
+    int m_daily_trades = 0;
     std::chrono::system_clock::time_point m_day_start;
     
-    // Мьютекс для потокобезопасности
     mutable std::mutex m_mutex;
 };
 

@@ -2,13 +2,9 @@
 #define AUDIT_H
 
 /*
- * audit.h — Модуль аудита и логирования
+ * audit.h — Аудит и логирование
  * 
- * Отвечает за:
- *   - JSONL-логирование каждого действия
- *   - SQLite для конфигурации, истории ордеров, статистики
- *   - Экспорт в CSV для анализа
- *   - Воспроизводимость сессий
+ * Записывает все действия в SQLite + JSONL для полной прозрачности.
  */
 
 #include "config.h"
@@ -22,29 +18,34 @@
 using json = nlohmann::json;
 
 // ============================================================================
-// Структура записи ордера в истории
+// Запись в истории ордеров
 // ============================================================================
 struct OrderRecord {
     std::string time;
-    std::string side;        // "buy" или "sell"
+    std::string side;
     std::string symbol;
-    double amount;
-    double price;
+    double amount = 0.0;
+    double price = 0.0;
     std::string status_str;
     std::string order_id;
+    std::string reason;
 };
 
 // ============================================================================
-// Класс логгера аудита
+// Логгер аудита
 // ============================================================================
 class AuditLogger {
 public:
     AuditLogger(const std::string& db_path, const std::string& jsonl_path);
     ~AuditLogger();
     
-    // Логирование команды (LLM → валидация → ответ)
-    void logCommand(const OrderCommand& cmd, const std::string& status, 
-                    const std::string& message);
+    // Логирование ордера
+    void logOrder(const OrderCommand& cmd, const std::string& status,
+                  const std::string& message, const std::string& order_id = "");
+    
+    // Логирование решения стратега
+    void logStrategistDecision(const StrategistDecision& decision,
+                                 const std::string& status);
     
     // Логирование системного события
     void logSystemEvent(const std::string& event, const std::string& details);
@@ -52,34 +53,23 @@ public:
     // Логирование ошибки
     void logError(const std::string& context, const std::string& error_msg);
     
-    // Получение последних ордеров
+    // Получение истории
     std::vector<OrderRecord> getRecentOrders(int limit = 20);
     
-    // Получение статистики
+    // Статистика
     json getStatistics();
     
-    // Экспорт в CSV
+    // CSV экспорт
     bool exportToCSV(const std::string& filepath);
     
 private:
-    // Инициализация SQLite
     void initDatabase();
-    
-    // Запись в JSONL
     void writeJSONL(const json& record);
     
-    // Пути к файлам
     std::string m_db_path;
     std::string m_jsonl_path;
-    
-    // Файловый поток для JSONL
     std::ofstream m_jsonl_file;
-    
-    // SQLite3 (используем через C callback или простой формат)
-    // TODO: Полноценная SQLite интеграция
     void* m_db = nullptr;
-    
-    // Мьютекс
     std::mutex m_mutex;
 };
 

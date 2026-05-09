@@ -2,13 +2,12 @@
 #define CLI_H
 
 /*
- * cli.h — Заголовочный файл CLI-оболочки
+ * cli.h — CLI-оболочка
  * 
- * Отвечает за:
- *   - Ввод команд пользователя
- *   - Отображение статусов и логов
- *   - Управление режимами (dry-run/live)
- *   - Цветной вывод и форматирование
+ * Поддерживает три режима:
+ *   MANUAL    — пользователь → DeepSeek-парсер → CoinEx
+ *   SEMI_AUTO — DeepSeek-стратег анализирует рынок, пользователь подтверждает
+ *   FULL_AUTO — DeepSeek-стратег торгует самостоятельно
  */
 
 #include "config.h"
@@ -20,20 +19,22 @@
 #include <memory>
 #include <string>
 #include <atomic>
+#include <thread>
 
 // ============================================================================
-// Структура конфигурации приложения (из аргументов CLI)
+// Конфигурация приложения
 // ============================================================================
 struct AppConfig {
-    TradingMode mode = TradingMode::DRY_RUN;
+    TradingMode mode          = TradingMode::DRY_RUN;
+    StrategistMode strat_mode = StrategistMode::MANUAL;
     std::string config_file;
-    std::string api_key;
-    std::string api_secret;
-    std::string deepseek_key;
+    std::string access_id;     // CoinEx API Key
+    std::string secret_key;    // CoinEx Secret Key
+    std::string deepseek_key;  // DeepSeek API Key
 };
 
 // ============================================================================
-// ANSI цвета для красивого вывода
+// ANSI цвета
 // ============================================================================
 namespace Color {
     const std::string RESET   = "\033[0m";
@@ -49,7 +50,7 @@ namespace Color {
 }
 
 // ============================================================================
-// Класс CLI
+// CLI
 // ============================================================================
 class CLI {
 public:
@@ -61,54 +62,70 @@ public:
     
     ~CLI();
     
-    // Запуск основного цикла обработки команд
+    // Запуск основного цикла
     void run();
     
-    // Остановка CLI (вызывается из обработчика сигналов)
+    // Остановка
     void shutdown();
     
 private:
-    // Обработка одной команды
+    // ------------------------------------------------------------------------
+    // Команды
+    // ------------------------------------------------------------------------
     void processCommand(const std::string& input);
-    
-    // Вывод приглашения к вводу
     void printPrompt();
-    
-    // Вывод справки по командам
     void printHelp();
-    
-    // Вывод текущего баланса
     void printBalance();
-    
-    // Вывод статуса системы
     void printStatus();
-    
-    // Вывод истории ордеров
     void printHistory();
-    
-    // Вывод текущих лимитов
     void printLimits();
     
-    // Обработка торговой команды (через LLM)
-    void processTradingCommand(const std::string& natural_language_input);
+    // ------------------------------------------------------------------------
+    // Чат с DeepSeek (свободное общение)
+    // ------------------------------------------------------------------------
+    void processChat(const std::string& input);
     
-    // Вывод предпросмотра ордера (dry-run)
+    // ------------------------------------------------------------------------
+    // Торговля
+    // ------------------------------------------------------------------------
+    void processTradingCommand(const std::string& input);  // MANUAL
     void printOrderPreview(const OrderCommand& cmd);
-    
-    // Исполнение ордера (live)
     OrderResult executeOrder(const OrderCommand& cmd);
     
-    // Компоненты системы
-    std::shared_ptr<AppConfig> m_config;
-    std::shared_ptr<LLMAgent> m_llm;
-    std::shared_ptr<Validator> m_validator;
+    // ------------------------------------------------------------------------
+    // Стратег
+    // ------------------------------------------------------------------------
+    void startStrategistLoop();         // SEMI_AUTO / FULL_AUTO
+    void stopStrategistLoop();
+    void strategistIteration();         // Одна итерация анализа
+    void printStrategistDecision(const StrategistDecision& d);
+    bool executeStrategistDecision(const StrategistDecision& d);
+    
+    // ------------------------------------------------------------------------
+    // Вспомогательные
+    // ------------------------------------------------------------------------
+    void switchToSemiAuto();
+    void switchToFullAuto();
+    void switchToManual();
+    
+    // ------------------------------------------------------------------------
+    // Компоненты
+    // ------------------------------------------------------------------------
+    std::shared_ptr<AppConfig>      m_config;
+    std::shared_ptr<LLMAgent>       m_llm;
+    std::shared_ptr<Validator>      m_validator;
     std::shared_ptr<ExchangeClient> m_exchange;
-    std::shared_ptr<AuditLogger> m_audit;
+    std::shared_ptr<AuditLogger>    m_audit;
     
-    // Флаг работы
+    // Состояние
     std::atomic<bool> m_running{true};
+    std::atomic<bool> m_strategist_running{false};
+    std::unique_ptr<std::thread> m_strategist_thread;
     
-    // История ввода (для стрелочек вверх/вниз)
+    // Конфигурация стратегии
+    StrategyConfig m_strategy;
+    
+    // История
     std::vector<std::string> m_history;
     size_t m_history_pos = 0;
 };
