@@ -271,7 +271,7 @@ void CLI::printStatus() {
     std::string sm;
     switch (m_config->strat_mode) {
         case StrategistMode::MANUAL:   sm = "Ручной"; break;
-        case StrategistMode::SEMI_AUTO: sm = "Полуавтомат (стратег-советник)"; break;
+        case StrategistMode::SEMI_AUTO: sm = "Авто-стратег"; break;
         case StrategistMode::FULL_AUTO: sm = "Автомат (стратег торгует)"; break;
     }
     std::cout << "  Стратег:  " << sm << "\n";
@@ -318,16 +318,9 @@ void CLI::printHistory() {
 // Лимиты
 // ============================================================================
 void CLI::printLimits() {
-    auto limits = m_validator->getLimits();
-    
-    std::cout << Color::BLUE << "\n🔒 Лимиты безопасности:\n" << Color::RESET;
-    std::cout << "  Макс. ордер:         $" << limits.max_order_usd << "\n";
-    std::cout << "  Дневной лимит:       $" << limits.daily_loss_limit << "\n";
-    std::cout << "  Макс. экспозиция:    " << limits.max_total_exposure_pct << "%\n";
-    std::cout << "  Макс. позиций:       " << limits.max_open_positions << "\n";
-    std::cout << "  Circuit breaker:     " << limits.circuit_breaker_errors << " ошибок → "
-              << limits.circuit_breaker_seconds << "с\n";
-    std::cout << "  Мин. уверенность:    " << limits.min_auto_confidence << "\n";
+    std::cout << Color::BLUE << "\n🔒 Ограничения:\n" << Color::RESET;
+    std::cout << "  Все лимиты сняты — торговля без ограничений.\n";
+    std::cout << "  Единственное ограничение: доступный баланс.\n";
     
     std::cout << "\n📋 Стратегия \"" << m_strategy.name << "\":\n";
     std::cout << "  Пары:                ";
@@ -664,10 +657,7 @@ bool CLI::executeStrategistDecision(const StrategistDecision& d) {
     try {
         if (d.action == "cancel") {
             // Отмена ордеров
-            for (size_t i = 0; i < d.cancel_order_ids.size(); ++i) {
-                (void)i;  // отмена всех ордеров (по ID — TODO)
-                m_exchange->cancelAllOrders();
-            }
+            m_exchange->cancelAllOrders();
             std::cout << Color::GREEN << "  ✅ Ордера отменены.\n" << Color::RESET;
             return true;
         }
