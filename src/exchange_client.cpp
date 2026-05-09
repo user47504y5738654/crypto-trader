@@ -113,10 +113,10 @@ ExchangeClient::~ExchangeClient() {
 //   METHOD + request_path[?query] + body + timestamp
 // 
 // Пример (GET с query):
-//   "GET/spot/pending-order?market=BTCUSDT&market_type=SPOT1700490703564"
+//   "GET/v2/spot/pending-order?market=BTCUSDT&market_type=SPOT1700490703564"
 // 
 // Пример (POST с body):
-//   "POST/spot/order{"market":"BTCUSDT",...}1700490703564"
+//   "POST/v2/spot/order{"market":"BTCUSDT",...}1700490703564"
 // 
 // Результат: lowercase hex, 64 символа
 // ============================================================================
@@ -169,8 +169,8 @@ std::string ExchangeClient::httpRequest(const std::string& method,
     // Временная метка
     std::string timestamp = std::to_string(currentTimeMs());
     
-    // request_path для подписи: путь + query (если есть)
-    std::string req_path = path;
+    // request_path для подписи: /v2 + путь + query (CoinEx требует полный путь)
+    std::string req_path = "/v2" + path;
     if (!query_string.empty()) {
         req_path += "?" + query_string;
     }
