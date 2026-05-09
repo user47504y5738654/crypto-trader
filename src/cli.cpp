@@ -375,8 +375,10 @@ void CLI::processChat(const std::string& input) {
             }
             
             if (m_config->mode == TradingMode::DRY_RUN) {
+                auto result = m_exchange->simulateOrder(cmd);
                 printOrderPreview(cmd);
-                m_audit->logOrder(cmd, "DRY_RUN", "чат-команда");
+                std::cout << Color::GREEN << "  [DRY] ID: " << result.order_id << Color::RESET << "\n";
+                m_audit->logOrder(cmd, "DRY_RUN", "чат-команда", result.order_id);
                 return;
             }
             
@@ -427,10 +429,12 @@ void CLI::processTradingCommand(const std::string& input) {
             std::cout << Color::YELLOW << "⚠ " << w << "\n" << Color::RESET;
         }
         
-        // Dry-run: предпросмотр
+        // Dry-run: симуляция с обновлением баланса
         if (m_config->mode == TradingMode::DRY_RUN) {
+            auto result = m_exchange->simulateOrder(cmd);
             printOrderPreview(cmd);
-            m_audit->logOrder(cmd, "DRY_RUN", "симуляция");
+            std::cout << Color::GREEN << "  [DRY] ID: " << result.order_id << Color::RESET << "\n";
+            m_audit->logOrder(cmd, "DRY_RUN", "симуляция", result.order_id);
             return;
         }
         
