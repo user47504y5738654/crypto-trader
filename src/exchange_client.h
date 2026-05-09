@@ -66,6 +66,9 @@ public:
     // Получение времени сервера
     int64_t getServerTime();
     
+    // Включение/выключение dry-run (даже при наличии ключей)
+    void setDryRun(bool dry);
+    
     // Dry-run: симуляция ордера
     OrderResult simulateOrder(const OrderCommand& cmd);
     
@@ -112,6 +115,7 @@ private:
     
     std::string m_access_id;       // CoinEx Access ID (API Key)
     std::string m_secret_key;      // CoinEx Secret Key
+    bool m_dry_run = true;         // Симуляция по умолчанию (безопасно)
     
     // Симулированный баланс для dry-run
     std::map<std::string, Balance> m_sim_balance;

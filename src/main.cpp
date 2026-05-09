@@ -162,6 +162,7 @@ int main(int argc, char* argv[]) {
         // Биржа
         auto exchange = std::make_shared<ExchangeClient>(
             config->access_id, config->secret_key);
+        exchange->setDryRun(config->mode == TradingMode::DRY_RUN);
         
         // Валидатор
         auto validator = std::make_shared<Validator>();

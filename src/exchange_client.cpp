@@ -107,6 +107,11 @@ ExchangeClient::~ExchangeClient() {
 }
 
 // ============================================================================
+void ExchangeClient::setDryRun(bool dry) {
+    m_dry_run = dry;
+}
+
+// ============================================================================
 // Создание HMAC-SHA256 подписи (CoinEx API v2)
 // 
 // Формат строки для подписи (без \n!):
@@ -251,7 +256,7 @@ std::string ExchangeClient::httpRequest(const std::string& method,
 // ============================================================================
 std::map<std::string, Balance> ExchangeClient::getSpotBalance() {
     // Dry-run: симулированный баланс
-    if (m_access_id.empty()) {
+    if (m_dry_run || m_access_id.empty()) {
         std::lock_guard<std::mutex> lock(m_mutex);
         return m_sim_balance;
     }
@@ -283,7 +288,7 @@ std::map<std::string, Ticker> ExchangeClient::getTickers(
     const std::vector<std::string>& symbols) {
     
     // Dry-run: симулированные цены
-    if (m_access_id.empty()) {
+    if (m_dry_run || m_access_id.empty()) {
         std::map<std::string, Ticker> sim;
         for (const auto& s : {"BTCUSDT", "ETHUSDT", "SOLUSDT"}) {
             Ticker t;
@@ -342,7 +347,7 @@ std::map<std::string, Ticker> ExchangeClient::getTickers(
 // ============================================================================
 std::vector<std::string> ExchangeClient::getMarketList() {
     // Dry-run: список по умолчанию
-    if (m_access_id.empty()) {
+    if (m_dry_run || m_access_id.empty()) {
         return {"BTCUSDT", "ETHUSDT", "SOLUSDT"};
     }
     
@@ -371,7 +376,7 @@ std::vector<std::string> ExchangeClient::getMarketList() {
 std::vector<OrderResult> ExchangeClient::getPendingOrders(
     const std::string& market, const std::string& side) {
     
-    if (m_access_id.empty()) return {};
+    if (m_dry_run || m_access_id.empty()) return {};
     
     std::string query = "market_type=" + CoinExConfig::MARKET_TYPE_SPOT;
     if (!market.empty()) query += "&market=" + market;
@@ -411,7 +416,7 @@ std::vector<OrderResult> ExchangeClient::getPendingOrders(
 std::vector<OrderResult> ExchangeClient::getFinishedOrders(
     const std::string& market, const std::string& side, int limit) {
     
-    if (m_access_id.empty()) return {};
+    if (m_dry_run || m_access_id.empty()) return {};
     
     std::string query = "market_type=" + CoinExConfig::MARKET_TYPE_SPOT +
                         "&limit=" + std::to_string(limit);
@@ -455,7 +460,7 @@ std::vector<OrderResult> ExchangeClient::getFinishedOrders(
 // ============================================================================
 OrderResult ExchangeClient::placeOrder(const OrderCommand& cmd) {
     // Dry-run
-    if (m_access_id.empty()) {
+    if (m_dry_run || m_access_id.empty()) {
         return simulateOrder(cmd);
     }
     
@@ -514,7 +519,7 @@ OrderResult ExchangeClient::placeOrder(const OrderCommand& cmd) {
 // DELETE /spot/order?market=X&market_type=SPOT
 // ============================================================================
 bool ExchangeClient::cancelAllOrders(const std::string& market) {
-    if (m_access_id.empty()) return true;
+    if (m_dry_run || m_access_id.empty()) return true;
     
     std::string query = "market_type=" + CoinExConfig::MARKET_TYPE_SPOT;
     if (!market.empty()) query += "&market=" + market;
@@ -534,7 +539,7 @@ bool ExchangeClient::cancelAllOrders(const std::string& market) {
 // ============================================================================
 bool ExchangeClient::cancelOrder(const std::string& order_id,
                                    const std::string& market) {
-    if (m_access_id.empty()) return true;
+    if (m_dry_run || m_access_id.empty()) return true;
     
     std::string query = "order_id=" + order_id +
                         "&market=" + market +
@@ -587,7 +592,7 @@ MarketContext ExchangeClient::getMarketContext() {
 // Проверка соединения
 // ============================================================================
 bool ExchangeClient::isConnected() {
-    if (m_access_id.empty()) return true;
+    if (m_dry_run || m_access_id.empty()) return true;
     
     try {
         httpRequest("GET", CoinExConfig::SPOT_MARKET);
