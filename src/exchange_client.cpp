@@ -116,6 +116,112 @@ void ExchangeClient::setSimBalance(const std::string& currency, double amount) {
     m_sim_balance[currency] = {amount, 0.0};
 }
 
+void ExchangeClient::setCMCKey(const std::string& key) {
+    m_cmc_key = key;
+}
+
+std::vector<PriceSnapshot> ExchangeClient::getPriceHistory() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_price_history;
+}
+
+// ============================================================================
+// CoinMarketCap API — получение реальных цен
+// ============================================================================
+std::map<std::string, Ticker> ExchangeClient::fetchCMCPrices(
+    const std::vector<std::string>& symbols) {
+    
+    std::map<std::string, Ticker> result;
+    
+    if (m_cmc_key.empty()) return result;
+    
+    // Формируем список символов: "BTC,ETH,SOL"
+    std::string sym_list;
+    for (size_t i = 0; i < symbols.size(); ++i) {
+        if (i > 0) sym_list += ",";
+        // BTCUSDT → BTC
+        std::string s = symbols[i];
+        if (s.length() > 4 && s.substr(s.length() - 4) == "USDT") {
+            s = s.substr(0, s.length() - 4);
+        }
+        sym_list += s;
+    }
+    
+    CURL* curl = curl_easy_init();
+    if (!curl) return result;
+    
+    std::string url = CMCConfig::API_URL + "?symbol=" + sym_list + "&convert=USD";
+    std::string response;
+    
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Accept: application/json");
+    std::string key_hdr = "X-CMC_PRO_API_KEY: " + m_cmc_key;
+    headers = curl_slist_append(headers, key_hdr.c_str());
+    
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWriteCb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+    
+    if (res != CURLE_OK || http_code != 200) {
+        std::cerr << "[CMC] HTTP " << http_code << ": " << 
+            (res != CURLE_OK ? curl_easy_strerror(res) : "OK") << "\n";
+        return result;
+    }
+    
+    try {
+        auto j = json::parse(response);
+        if (!j.contains("data")) return result;
+        
+        int64_t now = currentTimeMs();
+        
+        for (const auto& [coin, data] : j["data"].items()) {
+            if (!data.contains("quote") || !data["quote"].contains("USD")) continue;
+            
+            const auto& usd = data["quote"]["USD"];
+            std::string market = coin + "USDT";
+            
+            Ticker t;
+            t.market  = market;
+            t.last    = parseDouble(std::to_string(usd["price"].get<double>()));
+            t.volume  = parseDouble(std::to_string(usd["volume_24h"].get<double>()));
+            t.change_pct = parseDouble(std::to_string(usd["percent_change_24h"].get<double>()));
+            t.open    = t.last / (1.0 + t.change_pct / 100.0);
+            t.high    = t.last * 1.01;
+            t.low     = t.last * 0.99;
+            t.value   = t.volume * t.last;
+            
+            result[market] = t;
+            
+            // Сохраняем в историю
+            PriceSnapshot snap;
+            snap.timestamp = now;
+            snap.symbol = market;
+            snap.price = t.last;
+            snap.volume_24h = t.volume;
+            snap.change_24h_pct = t.change_pct;
+            
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_price_history.push_back(snap);
+            if (m_price_history.size() > 100) {
+                m_price_history.erase(m_price_history.begin());
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[CMC] Parse error: " << e.what() << "\n";
+    }
+    
+    return result;
+}
+
 // ============================================================================
 // Создание HMAC-SHA256 подписи (CoinEx API v2)
 // 
@@ -292,8 +398,14 @@ std::map<std::string, Balance> ExchangeClient::getSpotBalance() {
 std::map<std::string, Ticker> ExchangeClient::getTickers(
     const std::vector<std::string>& symbols) {
     
-    // Dry-run: симулированные цены
+    // Dry-run: CMC если есть ключ, иначе симуляция
     if (m_dry_run || m_access_id.empty()) {
+        // Пробуем CoinMarketCap для реальных цен
+        if (!m_cmc_key.empty()) {
+            auto cmc = fetchCMCPrices(symbols);
+            if (!cmc.empty()) return cmc;
+        }
+        // Fallback: симулированные цены
         std::map<std::string, Ticker> sim;
         for (const auto& s : {"BTCUSDT", "ETHUSDT", "SOLUSDT"}) {
             Ticker t;
@@ -577,6 +689,9 @@ MarketContext ExchangeClient::getMarketContext() {
         
         // Получаем открытые ордера
         ctx.open_orders = getPendingOrders();
+        
+        // История цен
+        ctx.price_history = getPriceHistory();
         
         // Вычисляем позиции на основе баланса
         for (const auto& [ccy, bal] : ctx.balances) {

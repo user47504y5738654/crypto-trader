@@ -69,6 +69,15 @@ public:
     // Включение/выключение dry-run (даже при наличии ключей)
     void setDryRun(bool dry);
     
+    // Ключ CoinMarketCap для реальных цен в dry-run
+    void setCMCKey(const std::string& key);
+    
+    // Получение цен через CoinMarketCap API
+    std::map<std::string, Ticker> fetchCMCPrices(const std::vector<std::string>& symbols);
+    
+    // История цен (последние N снимков)
+    std::vector<PriceSnapshot> getPriceHistory() const;
+    
     // Установка симулированного баланса (только dry-run)
     void setSimBalance(const std::string& currency, double amount);
     
@@ -118,7 +127,11 @@ private:
     
     std::string m_access_id;       // CoinEx Access ID (API Key)
     std::string m_secret_key;      // CoinEx Secret Key
+    std::string m_cmc_key;         // CoinMarketCap API Key
     bool m_dry_run = true;         // Симуляция по умолчанию (безопасно)
+    
+    // История цен (последние 100 снимков)
+    mutable std::vector<PriceSnapshot> m_price_history;
     
     // Симулированный баланс для dry-run
     std::map<std::string, Balance> m_sim_balance;

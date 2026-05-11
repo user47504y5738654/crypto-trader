@@ -114,6 +114,17 @@ struct Ticker {
 };
 
 // ============================================================================
+// Снимок цены (для истории)
+// ============================================================================
+struct PriceSnapshot {
+    int64_t timestamp = 0;
+    std::string symbol;
+    double price = 0.0;
+    double volume_24h = 0.0;
+    double change_24h_pct = 0.0;
+};
+
+// ============================================================================
 // Контекст рынка (передаётся стратегу DeepSeek)
 // ============================================================================
 struct MarketContext {
@@ -126,6 +137,9 @@ struct MarketContext {
     // Дневная статистика
     double daily_pnl = 0.0;
     int daily_trades = 0;
+    
+    // История цен (последние снимки)
+    std::vector<PriceSnapshot> price_history;
 };
 
 // ============================================================================
@@ -241,6 +255,13 @@ namespace CoinExConfig {
 };
 
 // ============================================================================
+// CoinMarketCap API — конфигурация
+// ============================================================================
+namespace CMCConfig {
+    const std::string API_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest";
+}
+
+// ============================================================================
 // DeepSeek API — конфигурация
 // ============================================================================
 namespace DeepSeekConfig {
@@ -257,7 +278,7 @@ namespace DeepSeekConfig {
     
     // Параметры для режима «стратег»
     const int STRATEGIST_MAX_TOKENS = 2000;
-    const double STRATEGIST_TEMPERATURE = 0.3;  // Немного креативности для анализа
+    const double STRATEGIST_TEMPERATURE = 0.5;  // Решительность и вариативность
 };
 
 #endif // CONFIG_H

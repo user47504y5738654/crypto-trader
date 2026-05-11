@@ -164,6 +164,13 @@ int main(int argc, char* argv[]) {
             config->access_id, config->secret_key);
         exchange->setDryRun(config->mode == TradingMode::DRY_RUN);
         
+        // CoinMarketCap ключ (если есть)
+        std::string cmc_key = SysUtil::getEnv("CM_API");
+        if (!cmc_key.empty()) {
+            exchange->setCMCKey(cmc_key);
+            std::cout << "  [CMC] Ключ CoinMarketCap загружен\n";
+        }
+        
         // Валидатор
         auto validator = std::make_shared<Validator>();
         validator->loadLimits();
