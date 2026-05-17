@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <cstdint>
 
 // ============================================================================
 // Версия приложения
@@ -79,6 +80,7 @@ struct OrderCommand {
 // ============================================================================
 struct OrderResult {
     std::string order_id;
+    std::string market;
     OrderStatus status = OrderStatus::PENDING;
     double filled_amount = 0.0;
     double filled_price = 0.0;
@@ -124,6 +126,35 @@ struct PriceSnapshot {
     double change_24h_pct = 0.0;
 };
 
+struct ExternalSentiment {
+    int fear_greed_value = -1;
+    std::string fear_greed_classification;
+    std::string updated_at;
+    bool available = false;
+};
+
+struct ExternalGlobalMarket {
+    double total_market_cap_usd = 0.0;
+    double total_volume_24h_usd = 0.0;
+    double btc_dominance_pct = 0.0;
+    std::string updated_at;
+    bool available = false;
+};
+
+struct ExternalNewsItem {
+    std::string source;
+    std::string title;
+    std::string published_at;
+    std::string link;
+};
+
+struct ExternalMarketContext {
+    ExternalSentiment sentiment;
+    ExternalGlobalMarket global_market;
+    std::vector<ExternalNewsItem> news;
+    std::vector<std::string> warnings;
+};
+
 // ============================================================================
 // Контекст рынка (передаётся стратегу DeepSeek)
 // ============================================================================
@@ -140,6 +171,7 @@ struct MarketContext {
     
     // История цен (последние снимки)
     std::vector<PriceSnapshot> price_history;
+    ExternalMarketContext external;
 };
 
 // ============================================================================
@@ -175,13 +207,13 @@ struct StrategyConfig {
     std::vector<std::string> symbols = {"BTCUSDT", "ETHUSDT", "SOLUSDT"};
     
     // Лимиты
-    double max_position_percent = 999999.0;     // Макс. позиция (снят)
-    double max_order_usd = 999999999.0;         // Макс. ордер (снят)
-    double daily_loss_limit = 999999999.0;      // Дневной лимит (снят)
-    int max_daily_trades = 999999;              // Макс. сделок (снят)
+    double max_position_percent = 35.0;
+    double max_order_usd = 1.0;
+    double daily_loss_limit = 100.0;
+    int max_daily_trades = 20;
     
     // Параметры стратегии
-    double min_confidence = 0.0;                // Мин. уверенность (снят)
+    double min_confidence = 0.55;
     double take_profit_default = 5.0;      // Тейк-профит по умолчанию (%)
     double stop_loss_default = 3.0;        // Стоп-лосс по умолчанию (%)
     
@@ -193,16 +225,16 @@ struct StrategyConfig {
 // Лимиты безопасности (глобальные)
 // ============================================================================
 struct RiskLimits {
-    double max_order_usd = 999999999.0;       // Макс. ордер (снят)
-    double daily_loss_limit = 999999999.0;     // Дневной лимит (снят)
-    double max_total_exposure_pct = 999999.0;  // Макс. экспозиция (снят)
-    int max_open_positions = 999999;           // Макс. позиций (снят)
-    double max_market_deviation_pct = 999999.0;
-    int circuit_breaker_errors = 999999;       // Circuit breaker (снят)
-    int circuit_breaker_seconds = 0;           // Circuit breaker (снят)
+    double max_order_usd = 1.0;
+    double daily_loss_limit = 100.0;
+    double max_total_exposure_pct = 60.0;
+    int max_open_positions = 5;
+    double max_market_deviation_pct = 5.0;
+    int circuit_breaker_errors = 5;
+    int circuit_breaker_seconds = 300;
     
     // Минимальная уверенность стратега для автоматической сделки
-    double min_auto_confidence = 0.0;          // (снят)
+    double min_auto_confidence = 0.65;
 };
 
 // ============================================================================
@@ -282,3 +314,4 @@ namespace DeepSeekConfig {
 };
 
 #endif // CONFIG_H
+

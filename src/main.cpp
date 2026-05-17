@@ -135,6 +135,14 @@ int main(int argc, char* argv[]) {
     std::cout << APP_NAME << " v" << APP_VERSION << "\n\n";
     
     auto config = parseArgs(argc, argv);
+
+    // LIVE mode must have explicit CoinEx credentials.
+    if (config->mode == TradingMode::LIVE &&
+        (config->access_id.empty() || config->secret_key.empty())) {
+        std::cerr << "[ОШИБКА] LIVE режим требует COINEX_API_KEY и COINEX_API_SECRET.\n";
+        std::cerr << "Запуск остановлен: без ключей сделки не будут отправлены на биржу.\n";
+        return 1;
+    }
     
     // Вывод режимов
     if (config->mode == TradingMode::DRY_RUN) {

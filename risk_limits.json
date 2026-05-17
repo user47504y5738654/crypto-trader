@@ -1,0 +1,10 @@
+{
+  "circuit_breaker_errors": 5,
+  "circuit_breaker_seconds": 300,
+  "daily_loss_limit": 100.0,
+  "max_market_deviation_pct": 5.0,
+  "max_open_positions": 5,
+  "max_order_usd": 1.0,
+  "max_total_exposure_pct": 60.0,
+  "min_auto_confidence": 0.65
+}

@@ -20,6 +20,7 @@
 #include <string>
 #include <atomic>
 #include <thread>
+#include <mutex>
 
 // ============================================================================
 // Конфигурация приложения
@@ -125,6 +126,11 @@ private:
     
     // Конфигурация стратегии
     StrategyConfig m_strategy;
+
+    // Ожидающее подтверждение решения стратега (SEMI_AUTO)
+    std::mutex m_pending_mutex;
+    bool m_has_pending_decision = false;
+    StrategistDecision m_pending_decision;
     
     // История
     std::vector<std::string> m_history;

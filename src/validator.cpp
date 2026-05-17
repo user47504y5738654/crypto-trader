@@ -9,6 +9,110 @@
 #include <iostream>
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+
+#include <nlohmann/json.hpp>
+
+using json = nlohmann::json;
+
+namespace {
+const char* kRiskLimitsFile = "risk_limits.json";
+
+bool inRange(double value, double min_value, double max_value) {
+    return value >= min_value && value <= max_value;
+}
+
+bool inRange(int value, int min_value, int max_value) {
+    return value >= min_value && value <= max_value;
+}
+
+bool writeLimitsAtomic(const std::filesystem::path& path, const RiskLimits& limits) {
+    const std::filesystem::path tmp_path = path.string() + ".tmp";
+
+    json j = {
+        {"max_order_usd", limits.max_order_usd},
+        {"daily_loss_limit", limits.daily_loss_limit},
+        {"max_total_exposure_pct", limits.max_total_exposure_pct},
+        {"max_open_positions", limits.max_open_positions},
+        {"max_market_deviation_pct", limits.max_market_deviation_pct},
+        {"circuit_breaker_errors", limits.circuit_breaker_errors},
+        {"circuit_breaker_seconds", limits.circuit_breaker_seconds},
+        {"min_auto_confidence", limits.min_auto_confidence}
+    };
+
+    std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        return false;
+    }
+    out << j.dump(2);
+    out.close();
+    if (!out.good()) {
+        return false;
+    }
+
+    std::error_code ec;
+    std::filesystem::rename(tmp_path, path, ec);
+    if (ec) {
+        std::filesystem::remove(path, ec);
+        ec.clear();
+        std::filesystem::rename(tmp_path, path, ec);
+        if (ec) {
+            std::filesystem::remove(tmp_path, ec);
+            return false;
+        }
+    }
+    return true;
+}
+
+RiskLimits parseLimitsWithFallback(const json& j, std::vector<std::string>& warnings) {
+    RiskLimits limits;
+    const RiskLimits defaults;
+
+    auto read_double = [&](const char* key, double min_v, double max_v, double& out, double default_v) {
+        if (!j.contains(key)) return;
+        if (!j[key].is_number()) {
+            warnings.push_back(std::string("РџРѕР»Рµ '") + key + "' РЅРµ С‡РёСЃР»Рѕ, РёСЃРїРѕР»СЊР·РѕРІР°РЅ default");
+            out = default_v;
+            return;
+        }
+        const double val = j[key].get<double>();
+        if (!inRange(val, min_v, max_v)) {
+            warnings.push_back(std::string("РџРѕР»Рµ '") + key + "' РІРЅРµ РґРёР°РїР°Р·РѕРЅР°, РёСЃРїРѕР»СЊР·РѕРІР°РЅ default");
+            out = default_v;
+            return;
+        }
+        out = val;
+    };
+
+    auto read_int = [&](const char* key, int min_v, int max_v, int& out, int default_v) {
+        if (!j.contains(key)) return;
+        if (!j[key].is_number_integer()) {
+            warnings.push_back(std::string("РџРѕР»Рµ '") + key + "' РЅРµ С†РµР»РѕРµ, РёСЃРїРѕР»СЊР·РѕРІР°РЅ default");
+            out = default_v;
+            return;
+        }
+        const int val = j[key].get<int>();
+        if (!inRange(val, min_v, max_v)) {
+            warnings.push_back(std::string("РџРѕР»Рµ '") + key + "' РІРЅРµ РґРёР°РїР°Р·РѕРЅР°, РёСЃРїРѕР»СЊР·РѕРІР°РЅ default");
+            out = default_v;
+            return;
+        }
+        out = val;
+    };
+
+    read_double("max_order_usd", 0.01, 1000000.0, limits.max_order_usd, defaults.max_order_usd);
+    read_double("daily_loss_limit", 1.0, 1000000.0, limits.daily_loss_limit, defaults.daily_loss_limit);
+    read_double("max_total_exposure_pct", 1.0, 100.0, limits.max_total_exposure_pct, defaults.max_total_exposure_pct);
+    read_int("max_open_positions", 1, 100, limits.max_open_positions, defaults.max_open_positions);
+    read_double("max_market_deviation_pct", 0.1, 100.0, limits.max_market_deviation_pct, defaults.max_market_deviation_pct);
+    read_int("circuit_breaker_errors", 1, 100, limits.circuit_breaker_errors, defaults.circuit_breaker_errors);
+    read_int("circuit_breaker_seconds", 1, 86400, limits.circuit_breaker_seconds, defaults.circuit_breaker_seconds);
+    read_double("min_auto_confidence", 0.0, 1.0, limits.min_auto_confidence, defaults.min_auto_confidence);
+
+    return limits;
+}
+}  // namespace
 
 // ============================================================================
 // РљРѕРЅСЃС‚СЂСѓРєС‚РѕСЂ
@@ -34,12 +138,62 @@ void Validator::updateLimits(const RiskLimits& limits) {
 
 void Validator::loadLimits() {
     std::lock_guard<std::mutex> lock(m_mutex);
-    std::cout << "  [VALIDATOR] Р›РёРјРёС‚С‹ Р·Р°РіСЂСѓР¶РµРЅС‹ (РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ)\n";
+    const std::filesystem::path path = std::filesystem::current_path() / kRiskLimitsFile;
+    const RiskLimits defaults;
+
+    if (!std::filesystem::exists(path)) {
+        m_limits = defaults;
+        if (writeLimitsAtomic(path, m_limits)) {
+            std::cout << "  [VALIDATOR] risk_limits.json missing, created with defaults.\n";
+        } else {
+            std::cerr << "  [VALIDATOR] Не удалось создать risk_limits.json, используются дефолты.\n";
+        }
+        return;
+    }
+
+    try {
+        std::ifstream in(path, std::ios::binary);
+        if (!in.is_open()) {
+            m_limits = defaults;
+            std::cerr << "  [VALIDATOR] Не удалось открыть risk_limits.json, используются дефолты.\n";
+            return;
+        }
+
+        json j;
+        in >> j;
+        std::vector<std::string> warnings;
+        m_limits = parseLimitsWithFallback(j, warnings);
+
+        if (warnings.empty()) {
+            std::cout << "  [VALIDATOR] Limits loaded from risk_limits.json.\n";
+            return;
+        }
+
+        std::cerr << "  [VALIDATOR] Лимиты загружены с предупреждениями:\n";
+        for (const auto& warning : warnings) {
+            std::cerr << "    - " << warning << "\n";
+        }
+
+        if (!writeLimitsAtomic(path, m_limits)) {
+            std::cerr << "  [VALIDATOR] Не удалось сохранить нормализованные лимиты.\n";
+        }
+    } catch (const std::exception& e) {
+        m_limits = defaults;
+        std::cerr << "  [VALIDATOR] Файл risk_limits.json поврежден: " << e.what()
+                  << ". Применены дефолты.\n";
+        if (!writeLimitsAtomic(path, m_limits)) {
+            std::cerr << "  [VALIDATOR] Не удалось перезаписать risk_limits.json дефолтами.\n";
+        }
+    }
 }
 
 void Validator::saveLimits(const RiskLimits& limits) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_limits = limits;
+    const std::filesystem::path path = std::filesystem::current_path() / kRiskLimitsFile;
+    if (!writeLimitsAtomic(path, m_limits)) {
+        std::cerr << "  [VALIDATOR] Failed to save risk_limits.json.\n";
+    }
 }
 
 // ============================================================================
@@ -367,3 +521,7 @@ ValidationResult Validator::validateLimits(const OrderCommand& cmd,
     
     return result;
 }
+
+
+
+

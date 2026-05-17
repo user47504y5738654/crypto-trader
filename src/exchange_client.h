@@ -114,6 +114,15 @@ private:
                              const std::string& path,
                              const std::string& body = "",
                              const std::string& query_string = "");
+
+    std::string httpRequestAbsolute(const std::string& url,
+                                     const std::vector<std::string>& headers = {});
+
+    ExternalSentiment fetchFearGreed(std::vector<std::string>& warnings);
+    ExternalGlobalMarket fetchGlobalMarket(std::vector<std::string>& warnings);
+    std::vector<ExternalNewsItem> fetchNewsHeadlines(std::vector<std::string>& warnings,
+                                                      int max_items = 5);
+    static std::string trim(const std::string& input);
     
     // Парсинг строки в double (безопасно)
     static double parseDouble(const std::string& s);

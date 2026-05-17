@@ -17,6 +17,8 @@
 #include <sstream>
 #include <thread>
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
 
 #include <curl/curl.h>
 
@@ -28,6 +30,33 @@ static size_t llmWriteCb(void* contents, size_t size, size_t nmemb, void* userp)
     auto* str = static_cast<std::string*>(userp);
     str->append(static_cast<char*>(contents), total);
     return total;
+}
+
+static std::string resolveCaBundlePath() {
+    const char* env_curl = std::getenv("CURL_CA_BUNDLE");
+    if (env_curl && std::filesystem::exists(env_curl)) {
+        return env_curl;
+    }
+
+    const char* env_ssl = std::getenv("SSL_CERT_FILE");
+    if (env_ssl && std::filesystem::exists(env_ssl)) {
+        return env_ssl;
+    }
+
+#ifdef _WIN32
+    const std::vector<std::string> candidates = {
+        "curl-ca-bundle.crt",
+        R"(C:\Program Files\Git\usr\ssl\cert.pem)",
+        R"(C:\Windows\System32\curl-ca-bundle.crt)"
+    };
+    for (const auto& path : candidates) {
+        if (std::filesystem::exists(path)) {
+            return path;
+        }
+    }
+#endif
+
+    return "";
 }
 
 // ============================================================================
@@ -264,8 +293,9 @@ std::string LLMAgent::buildMarketContextPrompt(const MarketContext& context) {
         prompt << "ОТКРЫТЫЕ ОРДЕРА:\n";
         for (const auto& order : context.open_orders) {
             prompt << "  ID: " << order.order_id
-                   << ", заполнено: " << order.filled_amount
-                   << " по $" << order.filled_price << "\n";
+                  << ", рынок: " << order.market
+                  << ", заполнено: " << order.filled_amount
+                  << " по $" << order.filled_price << "\n";
         }
         prompt << "\n";
     }
@@ -284,6 +314,44 @@ std::string LLMAgent::buildMarketContextPrompt(const MarketContext& context) {
             prompt << "  " << it->symbol << ": $" << it->price
                    << " (изм: " << (it->change_24h_pct >= 0 ? "+" : "")
                    << it->change_24h_pct << "%)\n";
+        }
+    }
+
+    prompt << "\nEXTERNAL SENTIMENT:\n";
+    if (context.external.sentiment.available) {
+        prompt << "  Fear & Greed: " << context.external.sentiment.fear_greed_value
+               << " (" << context.external.sentiment.fear_greed_classification << ")\n";
+    } else {
+        prompt << "  Fear & Greed: unavailable\n";
+    }
+
+    prompt << "\nGLOBAL MARKET:\n";
+    if (context.external.global_market.available) {
+        prompt << "  Total market cap (USD): $" << context.external.global_market.total_market_cap_usd << "\n";
+        prompt << "  24h volume (USD): $" << context.external.global_market.total_volume_24h_usd << "\n";
+        prompt << "  BTC dominance: " << context.external.global_market.btc_dominance_pct << "%\n";
+    } else {
+        prompt << "  Global market snapshot: unavailable\n";
+    }
+
+    prompt << "\nNEWS HEADLINES:\n";
+    if (!context.external.news.empty()) {
+        int idx = 1;
+        for (const auto& news : context.external.news) {
+            prompt << "  " << idx++ << ". [" << news.source << "] " << news.title;
+            if (!news.published_at.empty()) {
+                prompt << " (" << news.published_at << ")";
+            }
+            prompt << "\n";
+        }
+    } else {
+        prompt << "  No external headlines available.\n";
+    }
+
+    if (!context.external.warnings.empty()) {
+        prompt << "\nEXTERNAL WARNINGS:\n";
+        for (const auto& warning : context.external.warnings) {
+            prompt << "  - " << warning << "\n";
         }
     }
     
@@ -340,6 +408,12 @@ json LLMAgent::sendDeepSeekRequest(const std::string& system_prompt,
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_str);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+
+    const std::string ca_bundle = resolveCaBundlePath();
+    if (!ca_bundle.empty()) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, ca_bundle.c_str());
+    }
     
     CURLcode res = curl_easy_perform(curl);
     
