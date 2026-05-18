@@ -27,3 +27,7 @@ out/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local assistant/session files
+.deepseek/
+session_*.json
